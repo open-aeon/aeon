@@ -12,11 +12,13 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(partition_manager: crate::broker::partition::PartitionManager, consumer_group_manager: crate::broker::consumer_group::ConsumerGroupManager) -> Self {
-        let connection_manager = ConnectionManager::new(
-            1000, // 最大连接数
-            std::time::Duration::from_secs(300), // 空闲超时时间
-        );
+    pub fn new(
+        partition_manager: crate::broker::partition::PartitionManager,
+        consumer_group_manager: crate::broker::consumer_group::ConsumerGroupManager,
+        max_connections: usize,
+        idle_timeout: std::time::Duration,
+    ) -> Self {
+        let connection_manager = ConnectionManager::new(max_connections, idle_timeout);
 
         Self {
             partition_manager,
@@ -46,7 +48,7 @@ impl Server {
             };
 
             let partition_manager = self.partition_manager.clone();
-            let consumer_group_manager = self.consumer_group_manager.clone();
+            let mut consumer_group_manager = self.consumer_group_manager.clone();
             let connection_manager = self.connection_manager.clone();
 
             tokio::spawn(async move {
@@ -60,7 +62,7 @@ impl Server {
                                 println!("更新连接状态失败: {}", e);
                             }
 
-                            match crate::protocol::commands::handle_request(request, &partition_manager, &consumer_group_manager).await {
+                            match crate::protocol::commands::handle_request(request, &partition_manager, &mut consumer_group_manager).await {
                                 Ok(response) => {
                                     if let Err(e) = framed.send(response).await {
                                         println!("发送响应失败: {}", e);

@@ -1,0 +1,19 @@
+server:
+  host: "127.0.0.1"
+  port: 9092
+  max_connections: 1000
+  connection_idle_timeout:
+    secs: 300
+    nanos: 0
+
+storage:
+  data_dir: "data"
+  segment_size: 1048576
+  retention_hours: 168
+  max_segment_size: 1073741824
+
+log:
+  level: "info"
+  file: null
+  max_size: 104857600
+  max_files: 10 

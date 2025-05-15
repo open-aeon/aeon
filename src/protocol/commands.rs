@@ -17,7 +17,7 @@ use anyhow::Result;
 pub async fn handle_request(
     request: Request,
     partition_manager: &PartitionManager,
-    consumer_group_manager: &ConsumerGroupManager,
+    consumer_group_manager: &mut ConsumerGroupManager,
 ) -> Result<Response> {
     match request {
         Request::Produce(req) => handle_produce(req, partition_manager).await,
@@ -26,6 +26,9 @@ pub async fn handle_request(
         Request::CommitOffset(req) => handle_commit_offset(req, consumer_group_manager).await,
         Request::JoinGroup(req) => handle_join_group(req, consumer_group_manager).await,
         Request::LeaveGroup(req) => handle_leave_group(req, consumer_group_manager).await,
+        Request::Heartbeat => {
+            Ok(Response::Heartbeat)
+        }
     }
 }
 
@@ -169,7 +172,7 @@ async fn handle_metadata(
 
 async fn handle_commit_offset(
     req: CommitOffsetRequest,
-    consumer_group_manager: &ConsumerGroupManager,
+    consumer_group_manager: &mut ConsumerGroupManager,
 ) -> Result<Response> {
     println!("处理提交偏移量请求: group_id={}, topic={}, partition={}, offset={}, consumer_id={}",
         req.group_id, req.topic, req.partition, req.offset, req.consumer_id);

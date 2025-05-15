@@ -11,6 +11,7 @@ pub enum Request {
     CommitOffset(CommitOffsetRequest),
     JoinGroup(JoinGroupRequest),
     LeaveGroup(LeaveGroupRequest),
+    Heartbeat,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -21,6 +22,7 @@ pub enum Response {
     CommitOffset(CommitOffsetResponse),
     JoinGroup(JoinGroupResponse),
     LeaveGroup(LeaveGroupResponse),
+    Heartbeat,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
