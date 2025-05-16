@@ -1,13 +1,15 @@
-use crate::common::message::Message;
+use crate::protocol::message::ProtocolMessage;
 use memmap2::{MmapMut, MmapOptions};
 use std::{
-    fs::{File, OpenOptions},
-    io::{self, Write},
+    io::{self},
     path::Path,
-    sync::Arc,
     collections::HashMap,
 };
 use tokio::sync::RwLock;
+use anyhow::Result;
+use std::path::PathBuf;
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const SEGMENT_SIZE: usize = 1024 * 1024 * 1024; // 1GB per segment
 
@@ -21,14 +23,14 @@ pub struct LogSegment {
 }
 
 impl LogSegment {
-    pub fn new(path: &Path, base_offset: u64) -> io::Result<Self> {
+    pub async fn new(path: &Path, base_offset: u64) -> io::Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .open(path)?;
+            .open(path).await?;
 
-        file.set_len(SEGMENT_SIZE as u64)?;
+        file.set_len(SEGMENT_SIZE as u64).await?;
 
         let mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
@@ -41,7 +43,7 @@ impl LogSegment {
         })
     }
 
-    pub fn append(&mut self, message: &Message, logical_offset: u64) -> io::Result<u64> {
+    pub async fn append(&mut self, message: &ProtocolMessage, logical_offset: u64) -> io::Result<u64> {
         let message_bytes = bincode::serialize(message).map_err(|e| {
             io::Error::new(io::ErrorKind::Other, format!("Failed to serialize message: {}", e))
         })?;
@@ -69,12 +71,12 @@ impl LogSegment {
         self.mmap[self.position + 8..self.position + total_len].copy_from_slice(&message_bytes);
         
         self.position += total_len;
-        self.file.flush()?;
+        self.file.flush().await?;
 
         Ok(physical_offset)
     }
 
-    pub fn read(&self, logical_offset: u64) -> io::Result<Option<Message>> {
+    pub async fn read(&self, logical_offset: u64) -> io::Result<Option<ProtocolMessage>> {
         // 从索引中获取物理位置
         let position = match self.index.get(&logical_offset) {
             Some(pos) => *pos,
@@ -94,7 +96,7 @@ impl LogSegment {
 
         let message_bytes = &self.mmap[position + 8..position + 8 + message_len];
         
-        match bincode::deserialize::<Message>(message_bytes) {
+        match bincode::deserialize::<ProtocolMessage>(message_bytes) {
             Ok(message) => Ok(Some(message)),
             Err(e) => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -105,70 +107,74 @@ impl LogSegment {
 }
 
 pub struct Log {
-    segments: Vec<Arc<RwLock<LogSegment>>>,
-    current_segment: Arc<RwLock<LogSegment>>,
-    base_dir: String,
-    next_logical_offset: u64,
+    segments: RwLock<Vec<File>>,
+    current_segment: RwLock<File>,
+    base_dir: PathBuf,
+    next_logical_offset: RwLock<i64>,
 }
 
 impl Log {
-    pub fn new(base_dir: String) -> io::Result<Self> {
-        // 确保目录存在
-        std::fs::create_dir_all(&base_dir)?;
-        
-        let current_segment = Arc::new(RwLock::new(LogSegment::new(
-            Path::new(&base_dir).join("segment-0").as_ref(),
-            0,
-        )?));
+    pub async fn new(base_dir: String) -> Result<Self> {
+        let base_dir = PathBuf::from(base_dir);
+        let current_segment = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(base_dir.join("segment-0")).await?;
 
         Ok(Self {
-            segments: vec![current_segment.clone()],
-            current_segment,
+            segments: RwLock::new(vec![current_segment.try_clone().await?]),
+            current_segment: RwLock::new(current_segment),
             base_dir,
-            next_logical_offset: 0,
+            next_logical_offset: RwLock::new(0),
         })
     }
 
-    pub async fn append(&mut self, message: Message) -> io::Result<(u64, u64)> {
-        let logical_offset = self.next_logical_offset;
-        let result = {
-            let mut segment = self.current_segment.write().await;
-            segment.append(&message, logical_offset)
-        };
-
-        match result {
-            Ok(physical_offset) => {
-                self.next_logical_offset += 1;
-                Ok((logical_offset, physical_offset))
-            }
-            Err(e) if e.kind() == io::ErrorKind::OutOfMemory => {
-                // 创建新的 segment
-                let new_segment = Arc::new(RwLock::new(LogSegment::new(
-                    Path::new(&self.base_dir)
-                        .join(format!("segment-{}", self.segments.len()))
-                        .as_ref(),
-                    self.segments.len() as u64 * SEGMENT_SIZE as u64,
-                )?));
-                
-                self.segments.push(new_segment.clone());
-                self.current_segment = new_segment;
-                
-                let mut new_segment = self.current_segment.write().await;
-                let physical_offset = new_segment.append(&message, logical_offset)?;
-                self.next_logical_offset += 1;
-                Ok((logical_offset, physical_offset))
-            }
-            Err(e) => Err(e),
+    pub async fn append(&self, message: ProtocolMessage) -> Result<(i64, i64)> {
+        let mut current_segment = self.current_segment.write().await;
+        let mut next_offset = self.next_logical_offset.write().await;
+        
+        let offset = *next_offset;
+        let bytes = bincode::serialize(&message)?;
+        
+        // 检查是否需要创建新的段
+        if current_segment.metadata().await?.len() >= SEGMENT_SIZE as u64 {
+            let new_segment = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(self.base_dir.join(format!("segment-{}", self.segments.read().await.len()))).await?;
+            
+            self.segments.write().await.push(new_segment.try_clone().await?);
+            *current_segment = new_segment;
         }
+
+        current_segment.write_all(&bytes).await?;
+        *next_offset += 1;
+        
+        Ok((offset, *next_offset))
     }
 
-    pub async fn read(&self, logical_offset: u64) -> io::Result<Option<Message>> {
-        for segment in &self.segments {
-            let segment = segment.read().await;
-            if let Some(message) = segment.read(logical_offset)? {
-                return Ok(Some(message));
-            }
+    pub async fn read(&self, offset: i64) -> Result<Option<ProtocolMessage>> {
+        if offset >= *self.next_logical_offset.read().await {
+            return Ok(None);
         }
-        Ok(None)
+
+        let segment_index = (offset / SEGMENT_SIZE as i64) as usize;
+        let segments = self.segments.read().await;
+        
+        if segment_index >= segments.len() {
+            return Ok(None);
+        }
+
+        let mut file = segments[segment_index].try_clone().await?;
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer).await?;
+        
+        if let Ok(message) = bincode::deserialize::<ProtocolMessage>(&buffer) {
+            Ok(Some(message))
+        } else {
+            Ok(None)
+        }
     }
 } 

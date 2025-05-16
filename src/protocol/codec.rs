@@ -4,16 +4,10 @@ use tokio_util::codec::{Decoder, Encoder};
 
 use crate::protocol::{Request, Response};
 
-pub struct BifrostCodec;
+#[derive(Default)]
+pub struct ClientCodec;
 
-impl BifrostCodec {
-    #[allow(dead_code)]
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Decoder for BifrostCodec {
+impl Decoder for ClientCodec {
     type Item = Response;
     type Error = io::Error;
 
@@ -38,7 +32,7 @@ impl Decoder for BifrostCodec {
     }
 }
 
-impl Encoder<Request> for BifrostCodec {
+impl Encoder<Request> for ClientCodec {
     type Error = io::Error;
 
     fn encode(&mut self, item: Request, dst: &mut BytesMut) -> Result<(), Self::Error> {
@@ -55,14 +49,8 @@ impl Encoder<Request> for BifrostCodec {
     }
 }
 
+#[derive(Default)]
 pub struct ServerCodec;
-
-impl ServerCodec {
-    #[allow(dead_code)]
-    pub fn new() -> Self {
-        Self
-    }
-}
 
 impl Decoder for ServerCodec {
     type Item = Request;

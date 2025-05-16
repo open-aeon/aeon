@@ -2,7 +2,7 @@ use bifrost::{
     protocol::{
         FetchRequest, Request, Response,
     },
-    protocol::codec::BifrostCodec,
+    protocol::codec::ClientCodec,
 };
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
@@ -15,7 +15,7 @@ async fn main() -> anyhow::Result<()> {
     println!("正在连接到服务器...");
     let stream = TcpStream::connect("127.0.0.1:9092").await?;
     println!("已连接到服务器");
-    let mut framed = Framed::new(stream, BifrostCodec::new());
+    let mut framed = Framed::new(stream, ClientCodec::default());
 
     // 设置消费参数
     let topic = "test-topic";

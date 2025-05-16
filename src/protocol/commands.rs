@@ -3,9 +3,9 @@ use crate::{
         partition::PartitionManager,
         consumer_group::ConsumerGroupManager,
     },
-    common::message::{Message, TopicPartition},
+    protocol::message::TopicPartition,
     protocol::{
-        FetchRequest, FetchResponse, MetadataRequest, MetadataResponse, Message as ProtocolMessage,
+        FetchRequest, FetchResponse, MetadataRequest, MetadataResponse,
         PartitionMetadata, ProduceRequest, ProduceResponse, Request, Response, TopicMetadata,
         CommitOffsetRequest, CommitOffsetResponse,
         JoinGroupRequest, JoinGroupResponse,
@@ -48,9 +48,8 @@ async fn handle_produce(
         println!("写入消息: key={:?}, value={:?}", 
             protocol_message.key.as_ref().map(|k| String::from_utf8_lossy(k)),
             String::from_utf8_lossy(&protocol_message.value));
-        let message = Message::new(protocol_message.key, protocol_message.value);
         let (logical_offset, physical_offset) = partition_manager
-            .append_message(&topic_partition, message)
+            .append_message(&topic_partition, protocol_message)
             .await?;
         println!("消息写入成功，逻辑偏移量: {}, 物理偏移量: {}", logical_offset, physical_offset);
         last_logical_offset = logical_offset;
@@ -60,8 +59,8 @@ async fn handle_produce(
     Ok(Response::Produce(ProduceResponse {
         topic: req.topic,
         partition: req.partition,
-        base_offset: last_logical_offset,
-        physical_offset: last_physical_offset,
+        base_offset: last_logical_offset as u64,
+        physical_offset: last_physical_offset as u64,
     }))
 }
 
@@ -101,7 +100,7 @@ async fn handle_fetch(
     };
 
     let mut messages = Vec::new();
-    let mut current_offset = offset;
+    let mut current_offset = offset as i64;
     let mut total_bytes = 0;
     let mut next_offset = current_offset;
 
@@ -115,12 +114,7 @@ async fn handle_fetch(
                 message.key.as_ref().map(|k| String::from_utf8_lossy(k)),
                 String::from_utf8_lossy(&message.value));
             total_bytes += message.value.len() as u32;
-            let protocol_message = ProtocolMessage {
-                key: message.key,
-                value: message.value,
-                timestamp: message.timestamp as i64,
-            };
-            messages.push(protocol_message);
+            messages.push(message);
             next_offset = current_offset + 1;
             current_offset = next_offset;
         } else {
@@ -134,7 +128,7 @@ async fn handle_fetch(
         topic: req.topic,
         partition: req.partition,
         messages,
-        next_offset,
+        next_offset: next_offset as u64,
         group_id: req.group_id,
         consumer_id: req.consumer_id,
     }))

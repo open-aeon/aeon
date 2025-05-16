@@ -2,18 +2,18 @@ server:
   host: "127.0.0.1"
   port: 9092
   max_connections: 1000
-  connection_idle_timeout:
-    secs: 300
-    nanos: 0
+  connection_idle_timeout: "300s"
 
 storage:
   data_dir: "data"
-  segment_size: 1048576
+  segment_size: 1073741824 # 1GB
   retention_hours: 168
   max_segment_size: 1073741824
+  max_segments: 10
 
 log:
   level: "info"
-  file: null
-  max_size: 104857600
-  max_files: 10 
+  file: "bifrost.log"
+  rotation:
+    max_size: 104857600 # 100MB
+    max_files: 5 

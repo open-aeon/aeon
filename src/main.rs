@@ -12,6 +12,8 @@ use broker::{
 };
 use server::Server;
 use config::Config;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -34,8 +36,8 @@ async fn main() -> Result<()> {
 
     // 创建并启动服务器
     let server = Server::new(
-        partition_manager,
-        consumer_group_manager,
+        Arc::new(RwLock::new(partition_manager)),
+        Arc::new(RwLock::new(consumer_group_manager)),
         config.server.max_connections,
         config.server.connection_idle_timeout,
     );
