@@ -1,4 +1,4 @@
-use crate::protocol::message::ProtocolMessage;
+use crate::protocol::message::Message;
 use memmap2::{MmapMut, MmapOptions};
 use std::{
     io::{self},
@@ -43,7 +43,7 @@ impl LogSegment {
         })
     }
 
-    pub async fn append(&mut self, message: &ProtocolMessage, logical_offset: u64) -> io::Result<u64> {
+    pub async fn append(&mut self, message: &Message, logical_offset: u64) -> io::Result<u64> {
         let message_bytes = bincode::serialize(message).map_err(|e| {
             io::Error::new(io::ErrorKind::Other, format!("Failed to serialize message: {}", e))
         })?;
@@ -76,7 +76,7 @@ impl LogSegment {
         Ok(physical_offset)
     }
 
-    pub async fn read(&self, logical_offset: u64) -> io::Result<Option<ProtocolMessage>> {
+    pub async fn read(&self, logical_offset: u64) -> io::Result<Option<Message>> {
         // 从索引中获取物理位置
         let position = match self.index.get(&logical_offset) {
             Some(pos) => *pos,
@@ -96,7 +96,7 @@ impl LogSegment {
 
         let message_bytes = &self.mmap[position + 8..position + 8 + message_len];
         
-        match bincode::deserialize::<ProtocolMessage>(message_bytes) {
+        match bincode::deserialize::<Message>(message_bytes) {
             Ok(message) => Ok(Some(message)),
             Err(e) => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -130,7 +130,7 @@ impl Log {
         })
     }
 
-    pub async fn append(&self, message: ProtocolMessage) -> Result<(i64, i64)> {
+    pub async fn append(&self, message: Message) -> Result<(i64, i64)> {
         let mut current_segment = self.current_segment.write().await;
         let mut next_offset = self.next_logical_offset.write().await;
         
@@ -155,7 +155,7 @@ impl Log {
         Ok((offset, *next_offset))
     }
 
-    pub async fn read(&self, offset: i64) -> Result<Option<ProtocolMessage>> {
+    pub async fn read(&self, offset: i64) -> Result<Option<Message>> {
         if offset >= *self.next_logical_offset.read().await {
             return Ok(None);
         }
@@ -171,7 +171,7 @@ impl Log {
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer).await?;
         
-        if let Ok(message) = bincode::deserialize::<ProtocolMessage>(&buffer) {
+        if let Ok(message) = bincode::deserialize::<Message>(&buffer) {
             Ok(Some(message))
         } else {
             Ok(None)

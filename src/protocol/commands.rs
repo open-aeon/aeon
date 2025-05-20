@@ -3,7 +3,7 @@ use crate::{
         partition::PartitionManager,
         consumer_group::ConsumerGroupManager,
     },
-    protocol::message::TopicPartition,
+    common::metadata::TopicPartition,
     protocol::{
         FetchRequest, FetchResponse, MetadataRequest, MetadataResponse,
         PartitionMetadata, ProduceRequest, ProduceResponse, Request, Response, TopicMetadata,
@@ -45,9 +45,8 @@ async fn handle_produce(
     let mut last_logical_offset = 0;
     let mut last_physical_offset = 0;
     for protocol_message in req.messages {
-        println!("写入消息: key={:?}, value={:?}", 
-            protocol_message.key.as_ref().map(|k| String::from_utf8_lossy(k)),
-            String::from_utf8_lossy(&protocol_message.value));
+        println!("写入消息: content={:?}", 
+            String::from_utf8_lossy(&protocol_message.content));
         let (logical_offset, physical_offset) = partition_manager
             .append_message(&topic_partition, protocol_message)
             .await?;
@@ -109,11 +108,10 @@ async fn handle_fetch(
             .read_message(&topic_partition, current_offset)
             .await?
         {
-            println!("读取到消息: offset={}, key={:?}, value={:?}", 
+            println!("读取到消息: offset={}, content={:?}", 
                 current_offset,
-                message.key.as_ref().map(|k| String::from_utf8_lossy(k)),
-                String::from_utf8_lossy(&message.value));
-            total_bytes += message.value.len() as u32;
+                String::from_utf8_lossy(&message.content));
+            total_bytes += message.content.len() as u32;
             messages.push(message);
             next_offset = current_offset + 1;
             current_offset = next_offset;

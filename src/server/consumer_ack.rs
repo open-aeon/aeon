@@ -1,9 +1,8 @@
 use crate::protocol::ack::{AckAction, ConsumerAckConfig, ConsumerAckType, MessageStatus};
-use crate::protocol::message::ProtocolMessage;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tokio::time::{interval, Duration};
+use tokio::time::interval;
 
 /// 消费者 ACK 管理器
 pub struct ConsumerAckManager {

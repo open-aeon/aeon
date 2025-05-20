@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use super::message::ProtocolMessage;
+use crate::protocol::message::Message;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
@@ -24,7 +24,7 @@ pub struct ProduceResponse {
 pub struct FetchResponse {
     pub topic: String,
     pub partition: i32,
-    pub messages: Vec<ProtocolMessage>,
+    pub messages: Vec<Message>,
     pub next_offset: u64,
     pub group_id: String,
     pub consumer_id: String,

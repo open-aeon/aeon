@@ -58,10 +58,7 @@ async fn main() -> anyhow::Result<()> {
                     for message in fetch_response.messages {
                         println!("收到消息:");
                         println!("  偏移量: {}", offset);
-                        if let Some(key) = message.key {
-                            println!("  键: {}", String::from_utf8_lossy(&key));
-                        }
-                        println!("  值: {}", String::from_utf8_lossy(&message.value));
+                        println!("  内容: {}", String::from_utf8_lossy(&message.content));
                         println!("  时间戳: {}", message.timestamp);
                         println!("-------------------");
                     }

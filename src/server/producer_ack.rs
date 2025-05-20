@@ -1,5 +1,5 @@
 use crate::protocol::ack::{ProducerAckConfig, ProducerAckLevel};
-use crate::protocol::message::ProtocolMessage;
+use crate::protocol::message::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -11,7 +11,7 @@ pub struct ProducerAckManager {
     /// 配置
     config: ProducerAckConfig,
     /// 等待确认的消息
-    pending_messages: Arc<RwLock<HashMap<String, ProtocolMessage>>>,
+    pending_messages: Arc<RwLock<HashMap<String, Message>>>,
 }
 
 impl ProducerAckManager {
@@ -69,7 +69,7 @@ impl ProducerAckManager {
     }
 
     /// 添加待确认消息
-    pub async fn add_pending_message(&self, message: ProtocolMessage) {
+    pub async fn add_pending_message(&self, message: Message) {
         let mut pending = self.pending_messages.write().await;
         pending.insert(message.id.clone(), message);
     }

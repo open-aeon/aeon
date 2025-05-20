@@ -29,3 +29,6 @@ Cargo.lock
 
 # 依赖
 /vendor/ 
+
+diary.md
+tech_design.md

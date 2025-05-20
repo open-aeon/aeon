@@ -1,7 +1,7 @@
 use bifrost::{
     protocol::{MetadataRequest, ProduceRequest, Request, Response},
     protocol::codec::ClientCodec,
-    protocol::message::ProtocolMessage,
+    protocol::message::Message,
 };
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
@@ -33,14 +33,16 @@ async fn main() -> anyhow::Result<()> {
 
     // 2. 发送消息
     println!("\n发送消息...");
-    let message = ProtocolMessage {
+    let message = Message {
         id: uuid::Uuid::new_v4().to_string(),
         topic: "test-topic".to_string(),
         partition: 0,
-        key: Some("test-key".as_bytes().to_vec()),
-        value: "Hello, Bifrost!".as_bytes().to_vec(),
-        timestamp: chrono::Utc::now().timestamp_millis(),
-        offset: -1,
+        content: "Hello, Bifrost!".as_bytes().to_vec(),
+        timestamp: chrono::Utc::now(),
+        retry_count: 0,
+        next_retry_time: None,
+        retry_reason: None,
+        offset: None,
     };
 
     let produce_request = Request::Produce(ProduceRequest {

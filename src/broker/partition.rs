@@ -1,5 +1,6 @@
 use crate::{
-    protocol::message::{ProtocolMessage, TopicPartition},
+    common::metadata::TopicPartition,
+    protocol::message::Message,
     storage::log::Log,
 };
 use std::sync::Arc;
@@ -21,7 +22,7 @@ impl PartitionManager {
         })
     }
 
-    pub async fn append_message(&self, topic_partition: &TopicPartition, message: ProtocolMessage) -> Result<(i64, i64)> {
+    pub async fn append_message(&self, topic_partition: &TopicPartition, message: Message) -> Result<(i64, i64)> {
         let mut partitions = self.partitions.write().await;
         let log = if !partitions.contains_key(topic_partition) {
                 let log_dir = self.data_dir
@@ -37,7 +38,7 @@ impl PartitionManager {
         Ok(log.append(message).await?)
     }
 
-    pub async fn read_message(&self, topic_partition: &TopicPartition, logical_offset: i64) -> Result<Option<ProtocolMessage>> {
+    pub async fn read_message(&self, topic_partition: &TopicPartition, logical_offset: i64) -> Result<Option<Message>> {
         let partitions = self.partitions.read().await;
         if let Some(log) = partitions.get(topic_partition) {
             log.read(logical_offset).await.map_err(anyhow::Error::from)
