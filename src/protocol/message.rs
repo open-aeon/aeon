@@ -26,6 +26,7 @@ pub struct Message {
     pub offset: Option<i64>,
 }
 
+#[allow(dead_code)]
 impl Message {
     /// 从客户端消息创建协议消息
     pub fn from_client(topic: String, partition: i32, content: Vec<u8>) -> Self {

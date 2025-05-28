@@ -6,7 +6,6 @@ use tokio::sync::RwLock;
 use tokio::time::{timeout};
 
 /// 生产者 ACK 管理器
-#[allow(dead_code)]
 pub struct ProducerAckManager {
     /// 配置
     config: ProducerAckConfig,
@@ -14,6 +13,7 @@ pub struct ProducerAckManager {
     pending_messages: Arc<RwLock<HashMap<String, Message>>>,
 }
 
+#[allow(dead_code)]
 impl ProducerAckManager {
     /// 创建新的生产者 ACK 管理器
     pub fn new(config: ProducerAckConfig) -> Self {

@@ -11,6 +11,10 @@ use crate::{
         JoinGroupRequest, JoinGroupResponse,
         LeaveGroupRequest, LeaveGroupResponse,
     },
+    server::{
+        producer_ack::ProducerAckManager,
+        consumer_ack::ConsumerAckManager,
+    },
 };
 use anyhow::Result;
 
@@ -18,10 +22,12 @@ pub async fn handle_request(
     request: Request,
     partition_manager: &PartitionManager,
     consumer_group_manager: &mut ConsumerGroupManager,
+    producer_ack_manager: &ProducerAckManager,
+    consumer_ack_manager: &ConsumerAckManager,
 ) -> Result<Response> {
     match request {
-        Request::Produce(req) => handle_produce(req, partition_manager).await,
-        Request::Fetch(req) => handle_fetch(req, partition_manager, consumer_group_manager).await,
+        Request::Produce(req) => handle_produce(req, partition_manager, producer_ack_manager).await,
+        Request::Fetch(req) => handle_fetch(req, partition_manager, consumer_group_manager, consumer_ack_manager).await,
         Request::Metadata(req) => handle_metadata(req, partition_manager, consumer_group_manager).await,
         Request::CommitOffset(req) => handle_commit_offset(req, consumer_group_manager).await,
         Request::JoinGroup(req) => handle_join_group(req, consumer_group_manager).await,
@@ -35,6 +41,7 @@ pub async fn handle_request(
 async fn handle_produce(
     req: ProduceRequest,
     partition_manager: &PartitionManager,
+    producer_ack_manager: &ProducerAckManager,
 ) -> Result<Response> {
     println!("处理生产请求: topic={}, partition={}", req.topic, req.partition);
     let topic_partition = TopicPartition {
@@ -48,9 +55,13 @@ async fn handle_produce(
         println!("写入消息: content={:?}", 
             String::from_utf8_lossy(&protocol_message.content));
         let (logical_offset, physical_offset) = partition_manager
-            .append_message(&topic_partition, protocol_message)
+            .append_message(&topic_partition, protocol_message.clone())
             .await?;
         println!("消息写入成功，逻辑偏移量: {}, 物理偏移量: {}", logical_offset, physical_offset);
+        
+        // 添加消息到待确认列表
+        producer_ack_manager.add_pending_message(protocol_message).await;
+        
         last_logical_offset = logical_offset;
         last_physical_offset = physical_offset;
     }
@@ -67,6 +78,7 @@ async fn handle_fetch(
     req: FetchRequest,
     partition_manager: &PartitionManager,
     consumer_group_manager: &ConsumerGroupManager,
+    consumer_ack_manager: &ConsumerAckManager,
 ) -> Result<Response> {
     println!("处理获取请求: topic={}, partition={}, group_id={}, consumer_id={}", 
         req.topic, req.partition, req.group_id, req.consumer_id);
@@ -112,6 +124,12 @@ async fn handle_fetch(
                 current_offset,
                 String::from_utf8_lossy(&message.content));
             total_bytes += message.content.len() as u32;
+            
+            // 记录消息状态
+            if let Err(e) = consumer_ack_manager.handle_ack(&message.id, crate::protocol::ack::AckAction::Commit).await {
+                return Err(anyhow::anyhow!("处理消息确认失败: {}", e));
+            }
+            
             messages.push(message);
             next_offset = current_offset + 1;
             current_offset = next_offset;

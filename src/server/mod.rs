@@ -1,6 +1,6 @@
 mod connection;
-mod consumer_ack;
-mod producer_ack;
+pub mod consumer_ack;
+pub mod producer_ack;
 
 use crate::protocol::ack::{ConsumerAckConfig, ProducerAckConfig};
 use crate::server::connection::ConnectionManager;
@@ -11,6 +11,7 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use std::time::Duration;
 use futures::{StreamExt, SinkExt};
+use crate::protocol::commands;
 
 /// 服务器结构体
 pub struct Server {
@@ -79,10 +80,12 @@ impl Server {
                             let mut consumer_group_manager = _consumer_group_manager.write().await;
                             let partition_manager = _partition_manager.read().await;
                             
-                            match crate::protocol::commands::handle_request(
+                            match commands::handle_request(
                                 request,
                                 &partition_manager,
                                 &mut consumer_group_manager,
+                                &_producer_ack_manager,
+                                &_consumer_ack_manager,
                             ).await {
                                 Ok(response) => {
                                     if let Err(e) = framed.send(response).await {

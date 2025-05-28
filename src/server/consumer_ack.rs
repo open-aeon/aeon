@@ -14,6 +14,7 @@ pub struct ConsumerAckManager {
     retry_count: Arc<RwLock<HashMap<String, u32>>>,
 }
 
+#[allow(dead_code)]
 impl ConsumerAckManager {
     /// 创建新的消费者 ACK 管理器
     pub fn new(config: ConsumerAckConfig) -> Self {
