@@ -1,8 +1,8 @@
 use thiserror::Error;
 
-mod server;
-mod storage;
-mod protocol;
+pub mod server;
+pub mod storage;
+pub mod protocol;
 
 pub use server::ServerError;
 pub use storage::StorageError;

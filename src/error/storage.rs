@@ -2,6 +2,9 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum StorageError {
+    #[error("IO 错误: {0}")]
+    Io(#[from] std::io::Error),
+
     #[error("段已满")]
     SegmentFull,
     
