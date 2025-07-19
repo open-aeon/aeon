@@ -2,6 +2,9 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ProtocolError {
+    #[error("消息序列化错误: {0}")]
+    Serialization(String),
+
     #[error("无效的请求类型")]
     InvalidRequestType,
     

@@ -13,12 +13,9 @@ pub enum StorageError {
     
     #[error("偏移量无效")]
     InvalidOffset,
-    
-    #[error("消息序列化错误: {0}")]
-    Serialization(String),
-    
-    #[error("消息反序列化错误: {0}")]
-    Deserialization(String),
+
+    #[error("Data corruption")]
+    DataCorruption,
     
     #[error("其他错误: {0}")]
     Other(String),

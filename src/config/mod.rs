@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-mod server;
-mod storage;
-mod log;
+pub mod server;
+pub mod storage;
+pub mod log;
 
 pub use server::ServerConfig;
 pub use storage::StorageConfig;

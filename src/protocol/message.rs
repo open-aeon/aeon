@@ -1,4 +1,5 @@
-use crate::common::metadata::TopicPartition;
+use crate::{common::metadata::TopicPartition, error::ProtocolError};
+use crate::protocol::Encodable;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -84,5 +85,11 @@ impl Message {
         self.retry_count = 0;
         self.retry_reason = None;
         self.next_retry_time = None;
+    }
+}
+
+impl Encodable for Message {
+    fn encode_to_vec(&self) -> Result<Vec<u8>, ProtocolError> {
+        bincode::serialize(self).map_err(|e| ProtocolError::Serialization(e.to_string()))
     }
 } 
