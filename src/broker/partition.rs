@@ -1,58 +1,58 @@
 use crate::{
     common::metadata::TopicPartition,
-    protocol::message::Message,
-    storage::log::Log,
+    storage::{LogStorage, factory::{StorageFactory, StorageEngine}},
+    config::storage::StorageConfig,
 };
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use anyhow::Result;
-use std::{collections::HashMap, path::PathBuf};
+use anyhow::{Context, Result};
+use std::path::PathBuf;
 
-#[derive(Clone)]
-pub struct PartitionManager {
-    partitions: Arc<RwLock<HashMap<TopicPartition, Log>>>,
-    data_dir: PathBuf,
+pub struct Partition {
+    log: Box<dyn LogStorage>,
+    pub tp: TopicPartition,
 }
 
-impl PartitionManager {
-    pub fn new(data_dir: PathBuf) -> Result<Self> {
-        Ok(Self {
-            partitions: Arc::new(RwLock::new(HashMap::new())),
-            data_dir,
-        })
-    }
-
-    pub async fn append_message(&self, topic_partition: &TopicPartition, message: Message) -> Result<(i64, i64)> {
-        let mut partitions = self.partitions.write().await;
-        let log = if !partitions.contains_key(topic_partition) {
-                let log_dir = self.data_dir
-                    .join(&topic_partition.topic)
-                    .join(format!("{}", topic_partition.partition));
-            let log = Log::new(log_dir.to_string_lossy().to_string()).await?;
-            partitions.insert(topic_partition.clone(), log);
-            partitions.get(topic_partition).unwrap()
-        } else {
-            partitions.get(topic_partition).unwrap()
-        };
-
-        Ok(log.append(message).await?)
-    }
-
-    pub async fn read_message(&self, topic_partition: &TopicPartition, logical_offset: i64) -> Result<Option<Message>> {
-        let partitions = self.partitions.read().await;
-        if let Some(log) = partitions.get(topic_partition) {
-            log.read(logical_offset).await.map_err(anyhow::Error::from)
-        } else {
-            Ok(None)
+impl Partition {
+    pub fn create(tp: TopicPartition, path: PathBuf, engine: StorageEngine, config: StorageConfig) -> Result<Self> {
+        if path.exists() {
+            return Err(anyhow::anyhow!("Partition path does not exist: {}", path.display()));
         }
+
+        std::fs::create_dir_all(&path).with_context(||format!("Failed to create partition directory: {}", path.display()))?;
+
+        let log = StorageFactory::create(engine, path, config)?;
+        Ok(Self { log, tp })
     }
 
-    pub async fn get_partitions(&self, topic: &str) -> Result<Vec<TopicPartition>> {
-        let partitions = self.partitions.read().await;
-        Ok(partitions
-            .keys()
-            .filter(|tp| tp.topic == topic)
-            .cloned()
-            .collect())
+    pub fn load(tp: TopicPartition, path: PathBuf, engine: StorageEngine, config: StorageConfig) -> Result<Self> {
+        if !path.exists() {
+            return Err(anyhow::anyhow!("Partition path does not exist: {}", path.display()));
+        }
+
+        if !path.is_dir() {
+            return Err(anyhow::anyhow!("Partition path is not a directory: {}", path.display()));
+        }
+
+        let log = StorageFactory::create(engine, path.clone(), config)?;
+        Ok(Self { log, tp })
     }
-} 
+
+    pub async fn append(&mut self, data: &[u8]) -> Result<u64> {
+        self.log.append(data).await
+    }
+
+    pub async fn read(&self, offset: u64) -> Result<Vec<u8>> {
+        self.log.read(offset).await
+    }
+
+    pub async fn flush(&mut self) -> Result<()> {
+        self.log.flush().await
+    }
+
+    pub async fn cleanup(&mut self) -> Result<()> {
+        self.log.cleanup().await
+    }
+
+    pub async fn delete(self) -> Result<()> {
+        self.log.delete().await
+    }
+}

@@ -2,15 +2,15 @@ use crate::error::storage::StorageError;
 use memmap2::{MmapMut, MmapOptions};
 use crc::{Crc, CRC_32_ISCSI};
 use std::{
-    io::{self, Read, Write, BufReader, Seek, SeekFrom},
-    path::Path,
-    fs::{File, OpenOptions},
+    fs::{self,File, OpenOptions}, io::{BufReader, Read, Seek, SeekFrom, Write}, path::{Path, PathBuf}, time::SystemTime
 };
 
 const SEGMENT_SIZE: usize = 1024 * 1024 * 1024; // 1GB per segment
 // const INDEX_INTERVAL_BYTES: usize = 4 * 1024; // 4KB
 
 pub struct LogSegment {
+    log_path: PathBuf,
+    index_path: PathBuf,
     log_file: File,
     index_file: File,
     mmap: MmapMut,
@@ -31,26 +31,38 @@ impl LogSegment {
         self.base_offset
     }
 
+    pub fn size(&self) -> usize {
+        self.position
+    }
+
+    pub fn last_modified(&self) -> Result<SystemTime, StorageError> {
+        let metadata = self.log_file.metadata()?;
+        let modified_time = metadata.modified()?;
+        Ok(modified_time)
+    }
+
     pub fn create(path: &Path, base_offset: u64, index_interval_bytes: usize) -> Result<Self, StorageError> {
-        let log_file_name = format!("{:020}.log", base_offset);
+        let log_path = path.join(format!("{:020}.log", base_offset));
         let log_file = OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
-            .open(path.join(log_file_name))?;
+            .open(&log_path)?;
 
         log_file.set_len(SEGMENT_SIZE as u64)?;
 
-        let index_file_name = format!("{:020}.index", base_offset);
+        let index_path = path.join(format!("{:020}.index", base_offset));
         let index_file = OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
-            .open(path.join(index_file_name))?;
+            .open(&index_path)?;
             
         let mmap = unsafe { MmapOptions::new().map_mut(&log_file)? };
 
         Ok(Self {
+            log_path,
+            index_path,
             log_file,
             index_file,
             mmap,
@@ -64,11 +76,11 @@ impl LogSegment {
     }
 
     pub fn open(path: &Path, base_offset: u64, index_interval_bytes: usize) -> Result<Self, StorageError> {
-        let log_file_name = format!("{:020}.log", base_offset);
+        let log_path = path.join(format!("{:020}.log", base_offset));
         let log_file = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(path.join(log_file_name))?;
+            .open(&log_path)?;
 
         let log_file_metadata = log_file.metadata()?;
         let log_file_size = log_file_metadata.len();
@@ -76,88 +88,89 @@ impl LogSegment {
                 log_file.set_len(SEGMENT_SIZE as u64)?;
         }
 
-        let index_file_name = format!("{:020}.index", base_offset);
+        let index_path = path.join(format!("{:020}.index", base_offset));
         let mut index_file = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(path.join(index_file_name))?;
+            .open(&index_path)?;
 
         let mmap = unsafe { MmapOptions::new().map_mut(&log_file)? };
 
         let mut index_reader = BufReader::new(&index_file);
+        index_reader.seek(SeekFrom::Start(0))?;
         let mut record_count :u64 = 0;
-        let mut last_known_position :u64 = 0;
+        let mut position : usize = 0;
+        let mut bytes_since_last_index : usize = 0;
         let mut buf = [0u8; 8];
         let mut in_memory_index: Vec<(u32, u32)> = Vec::new();
-        loop {
-            match index_reader.read_exact(&mut buf) {
-                std::result::Result::Ok(()) => {
-                    record_count += 1;
-                    let relative_offset = u32::from_le_bytes(buf[0..4].try_into().unwrap());
-                    let physical_position = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-                    last_known_position = physical_position as u64;
-                    in_memory_index.push((relative_offset, physical_position));
-                }
-                std::result::Result::Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                    break;
-                }
-                std::result::Result::Err(e) => {
-                    return Err(e.into());
-                }
-            }
+        while let Ok(()) = index_reader.read_exact(&mut buf) {
+            let relative_offset = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+            let physical_position = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+            in_memory_index.push((relative_offset, physical_position));
         }
-        if index_file.metadata()?.len() > record_count * 8 {
-            index_file.set_len(record_count * 8)?;
+        
+        let clean_index_size: u64 = (in_memory_index.len() * 8) as u64;
+        if index_file.metadata()?.len() > clean_index_size {
+            index_file.set_len(clean_index_size)?;
         }
         index_file.seek(SeekFrom::End(0))?;
 
-        let mut current_physical_size = 0;
-        if record_count > 0 {
-            let pos = last_known_position as usize;
-            if pos + 12 <= log_file_size as usize {
-                let len_bytes: [u8; 8] = mmap[pos..pos + 8].try_into().unwrap();
-                let len = u64::from_le_bytes(len_bytes);
-                current_physical_size = last_known_position + 8 + 4 + len;
+        if let Some(&(_, last_indexed_position)) = in_memory_index.last() {
+            let pos = last_indexed_position as usize;
+            if pos + 12 > log_file_metadata.len() as usize {
+                position = pos
             } else {
-                current_physical_size = last_known_position;
+                let len_bytes: [u8; 8] = mmap[pos..pos + 8].try_into().unwrap();
+                let record_len = u64::from_le_bytes(len_bytes);
+                position = pos + 12 +record_len as usize;
             }
+            record_count = in_memory_index.last().map_or(0, |(ro, _)| ro + 1) as u64;
         }
 
-        while current_physical_size < log_file_size {
-            if current_physical_size + 12 > log_file_size {
+
+        while position < log_file_size as usize {
+            if position + 12 > log_file_size as usize {
                 break;
             }
-            let pos = current_physical_size as usize;
-            let len_bytes: [u8; 8] = mmap[pos..pos + 8].try_into().unwrap();
+            let current_record_physical_pos = position as usize;
+            let len_bytes: [u8; 8] = mmap[position..position + 8].try_into().unwrap();
             let record_len = u64::from_le_bytes(len_bytes);
+            let total_len = 12 + record_len as usize;
+            
+            if record_len == 0 || total_len > log_file_size as usize {
+                break;
+            }
 
-            let crc_bytes: [u8; 4] = mmap[pos + 8..pos + 12].try_into().unwrap();
+            let crc_bytes: [u8; 4] = mmap[position + 8..position + 12].try_into().unwrap();
             let stored_crc = u32::from_le_bytes(crc_bytes);
 
-            LogSegment::verify_record(&mmap, log_file_size as usize, pos, record_len, stored_crc)?;
+            LogSegment::verify_record(&mmap, log_file_size as usize, position, record_len, stored_crc)?;
 
-            if record_len == 0 || current_physical_size + 12 + record_len > log_file_size {
-                break;
+            let relative_offset = record_count as u32;
+            bytes_since_last_index += total_len;
+            if bytes_since_last_index >= index_interval_bytes || record_count == 0 {
+                let relative_offset_bytes = relative_offset.to_le_bytes();
+                let physical_position_bytes = (current_record_physical_pos as u32).to_le_bytes();
+                index_file.write_all(&relative_offset_bytes)?;
+                index_file.write_all(&physical_position_bytes)?;
+                in_memory_index.push((relative_offset, current_record_physical_pos as u32));
+                bytes_since_last_index = 0;
             }
 
-            current_physical_size += 12 + record_len;
+            position += total_len;
             record_count += 1;
         }
 
-        let bytes_since_last_index = if record_count > 0 {
-            current_physical_size - last_known_position
-        } else {
-            0
-        };
-
         Ok(Self {
+            log_path,
+            index_path,
             log_file,
             index_file,
             mmap,
-            position: current_physical_size as usize,
+            position,
             base_offset,
             record_count,
-            bytes_since_last_index: bytes_since_last_index as usize,
+            bytes_since_last_index,
             index: in_memory_index,
             index_interval_bytes,
         })
@@ -174,10 +187,6 @@ impl LogSegment {
         
         let total_len = 8 + 4 + record.len();
 
-        if self.position + total_len > SEGMENT_SIZE {
-            return Err(StorageError::SegmentFull);
-        }
-
         let physical_position = self.position as u32;
 
         // Write message length
@@ -190,23 +199,24 @@ impl LogSegment {
         self.position += total_len;
         self.bytes_since_last_index += total_len;
 
-        let relative_offset = self.base_offset + self.record_count;
+        let logical_offset = self.base_offset + self.record_count;
+        let relative_offset = self.record_count as u32;
 
         if self.bytes_since_last_index >= self.index_interval_bytes || self.record_count == 0 {
             let physical_position_for_index = physical_position as u32;
             let physical_position_bytes = physical_position_for_index.to_le_bytes();
-            let relative_offset_bytes = (relative_offset as u32).to_le_bytes();
+            let relative_offset_bytes = relative_offset.to_le_bytes();
             let mut index_entry_bytes = Vec::with_capacity(4 + 4);
             index_entry_bytes.extend_from_slice(&relative_offset_bytes);
             index_entry_bytes.extend_from_slice(&physical_position_bytes);
             self.index_file.write_all(&index_entry_bytes)?;
-            self.index.push((relative_offset as u32, physical_position_for_index as u32));
+            self.index.push((relative_offset, physical_position_for_index as u32));
             self.bytes_since_last_index = 0;
         }
 
         self.record_count += 1;
 
-        Ok(relative_offset)
+        Ok(logical_offset)
     }
 
     // todo: 后续考虑改为返回一个引用
@@ -266,6 +276,20 @@ impl LogSegment {
     pub fn flush(&mut self) -> Result<(), StorageError> {
         self.mmap.flush()?;
         self.index_file.sync_all()?;
+        Ok(())
+    }
+
+    pub fn delete(self) -> Result<(), StorageError> {
+        match fs::remove_file(self.log_path) {
+            Ok(_) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e.into()),
+        };
+        match fs::remove_file(self.index_path) {
+            Ok(_) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e.into()),
+        };
         Ok(())
     }
 
