@@ -34,6 +34,16 @@ impl LogStorage for MmapLogStorage {
         Ok(offset)
     }
 
+    async fn append_batch(&mut self, data: &[Vec<u8>]) -> Result<u64> {
+        let log_clone = self.log.clone();
+        let data_owned = data.to_vec();
+        let offset = tokio::task::spawn_blocking(move || {
+            log_clone.lock().expect("Fail to lock log").append_batch(&data_owned)
+        }).await??;
+
+        Ok(offset)
+    }
+
     async fn read(&self, logical_offset: u64) -> Result<Vec<u8>> {
         let log_clone = self.log.clone();
 
@@ -148,6 +158,46 @@ impl MmapLog {
         let logical_offset = segment.append(&record)?;
 
         Ok(logical_offset)
+    }
+
+    pub fn append_batch(&mut self, records: &[Vec<u8>]) -> Result<u64> {
+        if records.is_empty() {
+            let active_segment = self.segments.get(&self.active_segment_offset).unwrap();
+            return Ok(active_segment.base_offset() + active_segment.record_count());
+        }
+
+        let batch_size: usize = records.iter().map(|r| 12 + r.len()).sum();
+        let mut active_segment = self.segments.get_mut(&self.active_segment_offset).unwrap();
+
+        if active_segment.size() + batch_size > self.config.segment_size as usize {
+            if batch_size > self.config.segment_size as usize {
+                return Err(anyhow!(
+                    "Batch size ({}) is larger than segment size ({})",
+                    batch_size,
+                    self.config.segment_size
+                ));
+            }
+
+            let old_base_offset = self.active_segment_offset;
+            let new_base_offset = old_base_offset + active_segment.record_count();
+
+            println!(
+                "Batch does not fit in segment {}. Creating new segment with base offset {}",
+                old_base_offset, new_base_offset
+            );
+
+            let new_segment = LogSegment::create(
+                &self.path,
+                new_base_offset,
+                self.config.index_interval_bytes,
+            )?;
+            self.segments.insert(new_base_offset, new_segment);
+            self.active_segment_offset = new_base_offset;
+
+            active_segment = self.segments.get_mut(&self.active_segment_offset).unwrap();
+        }
+
+        active_segment.append_batch(records).map_err(|e| e.into())
     }
 
     pub fn read(&self, logical_offset: u64) -> Result<Vec<u8>> {

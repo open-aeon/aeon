@@ -3,16 +3,19 @@ use serde::{Deserialize, Serialize};
 pub mod server;
 pub mod storage;
 pub mod log;
+pub mod broker;
 
 pub use server::ServerConfig;
 pub use storage::StorageConfig;
 pub use log::LogConfig;
+pub use broker::BrokerConfig;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
     pub storage: StorageConfig,
     pub log: LogConfig,
+    pub broker: BrokerConfig,
 }
 
 impl Config {

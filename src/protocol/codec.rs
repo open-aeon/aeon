@@ -2,7 +2,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use std::io;
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::{error::ProtocolError, protocol::{Request, Response}};
+use crate::{error::protocol::ProtocolError, protocol::{Request, Response}};
 
 pub trait Encodable {
     fn encode_to_vec(&self) -> Result<Vec<u8>, ProtocolError>;

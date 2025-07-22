@@ -1,19 +1,19 @@
 use crate::broker::partition::Partition;
-use crate::common::metadata::TopicPartition;
+use crate::common::metadata::{TopicMetadata, TopicPartition};
 use crate::config::StorageConfig;
 use crate::storage::factory::StorageEngine;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::{collections::HashMap, path::PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock; 
 
 pub struct Topic {
     pub name: String,
-    partitions: Arc<RwLock<HashMap<i32, Partition>>>,
+    partitions: Arc<RwLock<HashMap<u32, Partition>>>,
 }
 
 impl Topic {
-    pub fn create(name: String, path: PathBuf, p_num: i32, engine: StorageEngine, config: &StorageConfig) -> Result<Self> {
+    pub fn create(name: String, path: PathBuf, p_num: u32, engine: StorageEngine, config: &StorageConfig) -> Result<Self> {
         if path.exists() {
             return Err(anyhow::anyhow!("Topic path already exists: {}", path.display()));
         }
@@ -24,8 +24,8 @@ impl Topic {
 
         for i in 0..p_num {
             let partition_path = path.join(format!("partition_{}", i));
-            let partition = Partition::create(TopicPartition { topic: name.clone(), partition: i }, partition_path, engine, config.clone())?;
-            local_partitions.insert(i, partition);
+            let partition = Partition::create(TopicPartition { topic: name.clone(), partition: i as u32 }, partition_path, engine, config.clone())?;
+            local_partitions.insert(i as u32, partition);
         }
 
         let partitions = Arc::new(RwLock::new(local_partitions));
@@ -49,7 +49,7 @@ impl Topic {
                 if partition_path.is_dir() {
                     if let Some(dir_name) = partition_path.file_name() {
                         if let Some(dir_name_str) = dir_name.to_str() {
-                            if let Ok(partition_id) = dir_name_str.parse::<i32>() {
+                            if let Ok(partition_id) = dir_name_str.parse::<u32>() {
                                 let partition = Partition::load(TopicPartition { topic: name.clone(), partition: partition_id }, partition_path, engine, config.clone())?;
                                 local_partitions.insert(partition_id, partition);
                             }
@@ -64,16 +64,25 @@ impl Topic {
         Ok(Self { name, partitions })
     }
 
-    pub async fn append(&self, p_id: i32, data: &[u8]) -> Result<u64> {
-        let mut partition = self.partitions.write().await;
-        if let Some(partition) = partition.get_mut(&p_id) {
+    pub async fn append(&self, p_id: u32, data: &[u8]) -> Result<u64> {
+        let partition = self.partitions.read().await;
+        if let Some(partition) = partition.get(&p_id) {
             partition.append(data).await
         } else {
             Err(anyhow::anyhow!("Partition not found: {}", p_id))
         }
     }
 
-    pub async fn read(&self, p_id: i32, offset: u64) -> Result<Vec<u8>> {
+    pub async fn append_batch(&self, p_id: u32, data: &[Vec<u8>]) -> Result<u64> {
+        let partition = self.partitions.read().await;
+        if let Some(partition) = partition.get(&p_id) {
+            partition.append_batch(data).await
+        } else {
+            Err(anyhow::anyhow!("Partition not found: {}", p_id))
+        }
+    }
+
+    pub async fn read(&self, p_id: u32, offset: u64) -> Result<Vec<u8>> {
         let partition = self.partitions.read().await;
         if let Some(partition) = partition.get(&p_id) {
             partition.read(offset).await
@@ -85,4 +94,109 @@ impl Topic {
     pub async fn partition_count(&self) -> usize {
         self.partitions.read().await.len()
     }
+
+    pub async fn flush_all(&self) -> Result<()> {
+        let partitions = self.partitions.read().await;
+    
+        let mut errors: Vec<anyhow::Error> = Vec::new();
+    
+        for partition in partitions.values() {
+            if let Err(e) = partition.flush().await {
+                errors.push(anyhow::anyhow!(
+                    "Failed to flush partition {}: {}",
+                    partition.tp.partition,
+                    e
+                ));
+            }
+        }
+    
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            let error_messages: String = errors
+                .into_iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<String>>()
+                .join("\n");
+            
+            Err(anyhow::anyhow!(
+                "Encountered errors while flushing partitions for topic '{}':\n{}",
+                self.name,
+                error_messages
+            ))
+        }
+    }
+
+    pub async fn cleanup(&self) -> Result<()> {
+        let partitions = self.partitions.read().await;
+        let mut errors: Vec<anyhow::Error> = Vec::new();
+
+        for partition in partitions.values() {
+            if let Err(e) = partition.cleanup().await {
+                errors.push(anyhow::anyhow!(
+                    "Failed to cleanup partition {}: {}",
+                    partition.tp.partition,
+                    e
+                ));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            let error_messages: String = errors.into_iter().map(|e| e.to_string()).collect::<Vec<String>>().join("\n");
+
+            Err(anyhow::anyhow!(
+                "Encountered errors while cleaning up partitions for topic '{}':\n{}",
+                self.name,
+                error_messages
+            ))
+        }
+    }
+
+    pub async fn delete(self) -> Result<()> {
+        let partitions_arc = self.partitions;
+        
+        let partition_rwlock = match Arc::try_unwrap(partitions_arc) {
+            Ok(rwlock) => rwlock,
+            Err(_) => {
+                return Err(anyhow!("Failed to delete topic: partitions still in use"));
+            }
+        };
+
+        let partitions = partition_rwlock.into_inner();
+
+        let mut errors: Vec<anyhow::Error> = Vec::new();
+
+        for partition in partitions.into_values() {
+            let p_id = partition.tp.partition.clone();
+            if let Err(e) = partition.delete().await {
+                errors.push(anyhow::anyhow!(
+                    "Failed to delete partition {}: {}",
+                    p_id,
+                    e
+                ));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            let error_messages: String = errors.into_iter().map(|e| e.to_string()).collect::<Vec<String>>().join("\n");
+
+            Err(anyhow::anyhow!(
+                "Encountered errors while deleting partitions for topic '{}':\n{}",
+                self.name,
+                error_messages
+            ))
+        }
+    }
+
+    pub async fn meta(&self) -> TopicMetadata {
+        let partitions = self.partitions.read().await;
+        let partition_count = partitions.len() as u32;
+        let replication_factor = 1; // todo: hardcoded replication factor
+        TopicMetadata { name: self.name.clone(), partition_count, replication_factor }
+    }
+
 }

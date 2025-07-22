@@ -1,20 +1,20 @@
 server:
-  host: "127.0.0.1"
-  port: 9092
-  max_connections: 1000
-  connection_idle_timeout: "300s"
+  host: 127.0.0.1
+  port: 8080
+  max_connections: 1024
+  connection_idle_timeout: 60s
 
 storage:
-  data_dir: "data"
+  engine: "mmap"
   segment_size: 1073741824 # 1GB
   index_interval_bytes: 4096 # 4KB
-  retention_hours: 168
-  max_segment_size: 1073741824
-  max_segments: 10
+  retention_policy_bytes: 10737418240 # 10GB
+  retention_policy_ms: 604800000 # 7 days
 
 log:
   level: "info"
-  file: "bifrost.log"
-  rotation:
-    max_size: 104857600 # 100MB
-    max_files: 5 
+
+broker:
+  data_dir: "data" # 移动到这里
+  flush_interval_ms: 1000
+  cleanup_interval_ms: 5000

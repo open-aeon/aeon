@@ -15,6 +15,11 @@ pub trait LogStorage: Send + Sync {
     /// On success, returns the logical offset assigned to this record.
     async fn append(&mut self, data: &[u8]) -> Result<u64>;
 
+    /// Append a batch of records to the log (as a byte slice).
+    ///
+    /// On success, returns the logical offset assigned to this record.
+    async fn append_batch(&mut self, data: &[Vec<u8>]) -> Result<u64>;
+
     /// Read a record by logical offset.
     ///
     /// If the record is found, returns a `Vec<u8>` containing its data.

@@ -219,6 +219,53 @@ impl LogSegment {
         Ok(logical_offset)
     }
 
+    pub fn append_batch(&mut self, data: &[Vec<u8>]) -> Result<u64, StorageError> {
+        if data.is_empty() {
+            return Ok(self.base_offset + self.record_count);
+        }
+
+        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
+        let mut last_logical_offset = 0;
+
+        for record in data {
+            let record_len = record.len() as u64;
+            let len_bytes = record_len.to_le_bytes();
+            let crc_bytes = crc.checksum(record).to_le_bytes();
+
+            let total_len = 8 + 4 + record.len();
+
+            if self.position + total_len > self.mmap.len() {
+                // todo: change to return the last logical offset
+                return Err(StorageError::SegmentFull);
+            }
+
+            let physical_position = self.position as u32;
+            self.mmap[self.position..self.position + 8].copy_from_slice(&len_bytes);
+            self.mmap[self.position + 8..self.position + 12].copy_from_slice(&crc_bytes);
+            self.mmap[self.position + 12..self.position + total_len].copy_from_slice(&record);
+
+            self.position += total_len;
+            self.bytes_since_last_index += total_len;
+
+            let logical_offset = self.base_offset + self.record_count;
+            let relative_offset = self.record_count as u32;
+            last_logical_offset = logical_offset;
+
+            if self.bytes_since_last_index >= self.index_interval_bytes || self.record_count == 0 {
+                let physical_position_bytes = physical_position.to_le_bytes();
+                let relative_offset_bytes = relative_offset.to_le_bytes();
+                self.index_file.write_all(&relative_offset_bytes)?;
+                self.index_file.write_all(&physical_position_bytes)?;
+                self.index.push((relative_offset, physical_position));
+                self.bytes_since_last_index = 0;
+            }
+
+            self.record_count += 1;
+        }
+
+        Ok(last_logical_offset)
+    }
+
     // todo: 后续考虑改为返回一个引用
     // pub fn read<'a>(&'a self, ...) -> Result<&'a [u8], StorageError>
     pub fn read(&self, relative_offset: u32) -> Result<Option<Vec<u8>>, StorageError> {

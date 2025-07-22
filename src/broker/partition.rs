@@ -5,9 +5,10 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use tokio::sync::Mutex;
 
 pub struct Partition {
-    log: Box<dyn LogStorage>,
+    log: Mutex<Box<dyn LogStorage>>,
     pub tp: TopicPartition,
 }
 
@@ -19,8 +20,8 @@ impl Partition {
 
         std::fs::create_dir_all(&path).with_context(||format!("Failed to create partition directory: {}", path.display()))?;
 
-        let log = StorageFactory::create(engine, path, config)?;
-        Ok(Self { log, tp })
+        let log_storage = StorageFactory::create(engine, path, config)?;
+        Ok(Self { log: Mutex::new(log_storage), tp })
     }
 
     pub fn load(tp: TopicPartition, path: PathBuf, engine: StorageEngine, config: StorageConfig) -> Result<Self> {
@@ -33,26 +34,36 @@ impl Partition {
         }
 
         let log = StorageFactory::create(engine, path.clone(), config)?;
-        Ok(Self { log, tp })
+        Ok(Self { log: Mutex::new(log), tp })
     }
 
-    pub async fn append(&mut self, data: &[u8]) -> Result<u64> {
-        self.log.append(data).await
+    pub async fn append(&self, data: &[u8]) -> Result<u64> {
+        let mut log = self.log.lock().await;
+        log.append(data).await
+    }
+
+    pub async fn append_batch(&self, data: &[Vec<u8>]) -> Result<u64> {
+        let mut log = self.log.lock().await;
+        log.append_batch(data).await
     }
 
     pub async fn read(&self, offset: u64) -> Result<Vec<u8>> {
-        self.log.read(offset).await
+        let log = self.log.lock().await;
+        log.read(offset).await
     }
 
-    pub async fn flush(&mut self) -> Result<()> {
-        self.log.flush().await
+    pub async fn flush(&self) -> Result<()> {
+        let mut log = self.log.lock().await;
+        log.flush().await
     }
 
-    pub async fn cleanup(&mut self) -> Result<()> {
-        self.log.cleanup().await
+    pub async fn cleanup(&self) -> Result<()> {
+        let mut log = self.log.lock().await;
+        log.cleanup().await
     }
 
     pub async fn delete(self) -> Result<()> {
-        self.log.delete().await
+        let log = self.log.into_inner();
+        log.delete().await
     }
 }
