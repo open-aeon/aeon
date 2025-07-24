@@ -1,9 +1,11 @@
 use crate::broker::Broker;
 use crate::common::metadata::TopicPartition;
+use crate::broker::consumer_group::ConsumerMember;
 use crate::error::StorageError;
 use crate::protocol::message::Message;
 use crate::protocol::*;
 use anyhow::Result;
+use std::time::Duration;
 
 pub async fn handle_request(request: Request, broker: &Broker) -> Result<Response> {
     let response = match request {
@@ -11,7 +13,11 @@ pub async fn handle_request(request: Request, broker: &Broker) -> Result<Respons
         Request::Fetch(req) => handle_fetch(req, broker).await,
         Request::Metadata(req) => handle_metadata(req, broker).await,
         Request::CreateTopic(req) => handle_create_topic(req, broker).await,
-        Request::Heartbeat => Ok(Response::Heartbeat),
+        Request::CommitOffset(req) => handle_commit_offset(req, broker).await,
+        Request::FetchOffset(req) => handle_fetch_offset(req, broker).await,
+        Request::JoinGroup(req) => handle_join_group(req, broker).await,
+        Request::LeaveGroup(req) => handle_leave_group(req, broker).await,
+        Request::Heartbeat(req) => handle_heartbeat(req, broker).await,
     };
 
     // 统一错误处理
@@ -124,4 +130,90 @@ async fn handle_create_topic(req: CreateTopicRequest, broker: &Broker) -> Result
         name: req.name,
         error: response.err().map(|e| e.to_string()),
     }))
+}
+
+async fn handle_commit_offset(req: CommitOffsetRequest, broker: &Broker) -> Result<Response> {
+    let mut results = Vec::with_capacity(req.topic_partitions.len());
+    for tpo in req.topic_partitions {
+        let tp = TopicPartition {
+            topic: tpo.topic,
+            partition: tpo.partition,
+        };
+        let result = broker.commit_offset(req.group_id.clone(), tp.clone(), tpo.offset).await;
+        let error_code = match result {
+            Ok(_) => None,
+            Err(_) => Some(ErrorCode::Unknown),
+        };
+        results.push(TopicPartitionResult {
+            topic: tp.topic,
+            partition: tp.partition,
+            error_code,
+        })
+    }
+    Ok(Response::CommitOffset(CommitOffsetResponse {
+        results,
+    }))
+}
+
+async fn handle_fetch_offset(req: FetchOffsetRequest, broker: &Broker) -> Result<Response> {
+    let mut results = Vec::with_capacity(req.topic_partitions.len());
+    for tp in req.topic_partitions {
+        let result = broker.fetch_offset(&req.group_id, &tp).await;
+        let (offset, error_code) = match result {
+            Ok(Some(offset)) => (offset, None),
+            Ok(None) => (-1, Some(ErrorCode::OffsetNotFound)),
+            Err(_) => (-1, Some(ErrorCode::Unknown) ),
+        };
+        results.push(TopicPartitionOffsetResult {
+            topic: tp.topic,
+            partition: tp.partition,
+            offset,
+            error_code,
+        });
+    }
+    Ok(Response::FetchOffset(FetchOffsetResponse {
+        results,
+    }))
+}
+
+async fn handle_join_group(req: JoinGroupRequest, broker: &Broker) -> Result<Response> {
+    let result = broker.join_group(req.group_id, req.member_id, req.session_timeout_ms).await;
+    match result {
+        Ok((member_id, generation_id, leader_id)) => {
+            Ok(Response::JoinGroup(JoinGroupResponse {
+                error_code: None,
+                generation_id,
+                member_id,
+                leader_id,
+            }))
+        }
+        Err(_e) => {
+            Ok(Response::JoinGroup(JoinGroupResponse {
+                error_code: Some(ErrorCode::Unknown),
+                generation_id: 0,
+                member_id: "".to_string(),
+                leader_id: "".to_string(),
+            }))
+        }
+    }
+}
+
+async fn handle_leave_group(req: LeaveGroupRequest, broker: &Broker) -> Result<Response> {
+    let result = broker.leave_group(&req.group_id, &req.member_id).await;
+    let error_code = match result {
+        Ok(_) => None,
+        Err(_) => Some(ErrorCode::Unknown),
+    };
+    Ok(Response::LeaveGroup(LeaveGroupResponse {
+        error_code,
+    }))
+}
+
+async fn handle_heartbeat(req: HeartbeatRequest, broker: &Broker) -> Result<Response> {
+    let result = broker.heartbeat(&req.group_id, &req.member_id).await;
+    let error_code = match result {
+        Ok(_) => None,
+        Err(_) => Some(ErrorCode::Unknown),
+    };
+    Ok(Response::Heartbeat(HeartbeatResponse { error_code }))
 }

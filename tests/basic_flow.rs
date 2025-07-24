@@ -98,3 +98,131 @@ async fn test_create_produce_fetch_single_message() -> Result<()> {
     
     Ok(())
 }
+
+// TC-BF-02: Batch message production and consumption
+#[tokio::test]
+async fn test_produce_fetch_batch_messages() -> Result<()> {
+    let mut context = setup().await?;
+    let topic_name = "batch-topic".to_string();
+    let partition = 0;
+
+    // 1. Create Topic
+    context.client.create_topic(CreateTopicRequest {
+        name: topic_name.clone(),
+        partition_num: 1,
+        replication_factor: 1,
+    }).await?;
+
+    // 2. Produce a batch of messages
+    let messages_to_send = vec![
+        Message::new(b"batch message 1".to_vec()),
+        Message::new(b"batch message 2".to_vec()),
+        Message::new(b"batch message 3".to_vec()),
+    ];
+    
+    let produce_req = ProduceRequest {
+        topic: topic_name.clone(),
+        partition,
+        messages: messages_to_send.clone(),
+    };
+    let produce_res = context.client.produce(produce_req).await?;
+    assert_eq!(produce_res.base_offset, 2); // Offsets 0, 1, 2
+
+    // 3. Fetch the messages back
+    let fetch_req = FetchRequest {
+        topic: topic_name,
+        partition,
+        offset: 0,
+        max_bytes: 1024,
+    };
+    let fetch_res = context.client.fetch(fetch_req).await?;
+
+    // 4. Validate the result
+    assert_eq!(fetch_res.messages.len(), 3);
+    assert_eq!(fetch_res.next_offset, 3);
+    for i in 0..3 {
+        assert_eq!(fetch_res.messages[i].content, messages_to_send[i].content);
+    }
+
+    Ok(())
+}
+
+// TC-OM-01: Fetch from a specific offset
+#[tokio::test]
+async fn test_fetch_from_specific_offset() -> Result<()> {
+    let mut context = setup().await?;
+    let topic_name = "offset-topic".to_string();
+    let partition = 0;
+
+    // 1. Create Topic and produce 5 messages
+    context.client.create_topic(CreateTopicRequest { name: topic_name.clone(), partition_num: 1, replication_factor: 1 }).await?;
+    let messages_to_send: Vec<Message> = (0..5).map(|i| Message::new(format!("message {}", i).into_bytes())).collect();
+    context.client.produce(ProduceRequest { topic: topic_name.clone(), partition, messages: messages_to_send }).await?;
+
+    // 2. Fetch starting from offset 3
+    let fetch_req = FetchRequest {
+        topic: topic_name,
+        partition,
+        offset: 3,
+        max_bytes: 1024,
+    };
+    let fetch_res = context.client.fetch(fetch_req).await?;
+
+    // 3. Validate the result
+    assert_eq!(fetch_res.messages.len(), 2); // Should get message 3 and 4
+    assert_eq!(fetch_res.messages[0].content, b"message 3");
+    assert_eq!(fetch_res.messages[1].content, b"message 4");
+    assert_eq!(fetch_res.next_offset, 5);
+
+    Ok(())
+}
+
+// TC-OM-02: Fetch from an out-of-bounds offset
+#[tokio::test]
+async fn test_fetch_offset_out_of_bounds() -> Result<()> {
+    let mut context = setup().await?;
+    let topic_name = "out-of-bounds-topic".to_string();
+    let partition = 0;
+    
+    context.client.create_topic(CreateTopicRequest { name: topic_name.clone(), partition_num: 1, replication_factor: 1 }).await?;
+    let messages = vec![Message::new(b"message 0".to_vec())];
+    context.client.produce(ProduceRequest { topic: topic_name.clone(), partition, messages }).await?;
+
+    // 2. Fetch from offset 5 (which doesn't exist)
+    let fetch_req = FetchRequest {
+        topic: topic_name,
+        partition,
+        offset: 5,
+        max_bytes: 1024,
+    };
+    let fetch_res = context.client.fetch(fetch_req).await?;
+
+    // 3. Validate the result
+    assert!(fetch_res.messages.is_empty());
+    assert_eq!(fetch_res.next_offset, 5); // next_offset remains the requested offset
+
+    Ok(())
+}
+
+// TC-EH-01: Produce to a non-existent topic
+#[tokio::test]
+async fn test_produce_to_non_existent_topic() -> Result<()> {
+    let mut context = setup().await?;
+    let topic_name = "i-do-not-exist".to_string();
+
+    let produce_req = ProduceRequest {
+        topic: topic_name,
+        partition: 0,
+        messages: vec![Message::new(b"test".to_vec())],
+    };
+    
+    // The call should fail
+    let produce_result = context.client.produce(produce_req).await;
+    assert!(produce_result.is_err());
+    
+    // Optional: Check for a specific error message
+    let error_message = produce_result.err().unwrap().to_string();
+    assert!(error_message.contains("Topic not found"));
+
+    Ok(())
+}

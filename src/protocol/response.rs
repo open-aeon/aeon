@@ -7,7 +7,11 @@ pub enum Response {
     Fetch(FetchResponse),
     Metadata(MetadataResponse),
     CreateTopic(CreateTopicResponse),
-    Heartbeat,
+    CommitOffset(CommitOffsetResponse),
+    FetchOffset(FetchOffsetResponse),
+    JoinGroup(JoinGroupResponse),
+    LeaveGroup(LeaveGroupResponse),
+    Heartbeat(HeartbeatResponse),
     Error(ErrorResponse),
 }
 
@@ -52,6 +56,50 @@ pub struct CreateTopicResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct CommitOffsetResponse {
+    pub results: Vec<TopicPartitionResult>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TopicPartitionResult {
+    pub topic: String,
+    pub partition: u32,
+    pub error_code: Option<ErrorCode>,
+}
+
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FetchOffsetResponse {
+    pub results: Vec<TopicPartitionOffsetResult>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TopicPartitionOffsetResult {
+    pub topic: String,
+    pub partition: u32,
+    pub offset: i64,
+    pub error_code: Option<ErrorCode>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JoinGroupResponse {
+    pub error_code: Option<ErrorCode>,
+    pub generation_id: u32,
+    pub member_id: String,
+    pub leader_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LeaveGroupResponse {
+    pub error_code: Option<ErrorCode>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HeartbeatResponse {
+    pub error_code: Option<ErrorCode>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub code: ErrorCode,
     pub message: String,
@@ -67,6 +115,7 @@ pub enum ErrorCode {
     PartitionNotFound = 10,
     // Offset Errors
     OffsetOutOfRange = 20,
+    OffsetNotFound = 21,
     // Data Errors
     DataCorruption = 30,
 }
