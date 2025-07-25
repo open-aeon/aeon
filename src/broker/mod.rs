@@ -1,6 +1,7 @@
 pub mod partition;
 pub mod topic;
 pub mod consumer_group;
+pub mod assignment;
 
 use anyhow::{Context, Result};
 use uuid::Uuid;
@@ -216,7 +217,7 @@ impl Broker {
         Ok(meta)
     }
 
-    pub  async fn join_group(&self, group_id: String, member_id: String, session_timeout: u64) -> Result<(String, u32, String)> {
+    pub  async fn join_group(&self, group_id: String, member_id: String, session_timeout: u64) -> Result<(String, u32)> {
         let mut groups = self.consumer_groups.write().await;
         
         let group = groups.entry(group_id.clone()).or_insert_with(|| Arc::new(RwLock::new(ConsumerGroup::new(group_id))));
@@ -236,28 +237,19 @@ impl Broker {
         };
 
         let is_new_member = group_lock.add_member(member);
-        let leader_id = group_lock.leader_election()?;
         if is_new_member {
-            group_lock.rebalance()?;
+            group_lock.rebalance();
         }
         let generation_id = group_lock.generation_id;
 
-        Ok((new_member_id, generation_id, leader_id))
+        Ok((new_member_id, generation_id))
     }
 
     pub async fn leave_group(&self, group_id: &str, member_id: &str) -> Result<()> {
         let groups = self.consumer_groups.read().await;
         if let Some(group) = groups.get(group_id) {
             let mut group_lock = group.write().await;
-            let existed = group_lock.remove_member(member_id);
-
-            if existed.is_some() {
-                if let Some(leader) = &group_lock.leader_id {
-                    if leader == member_id {
-                        group_lock.leader_election()?;
-                    }
-                }
-            }
+            group_lock.remove_member(member_id);
         }
 
         Ok(())
@@ -404,10 +396,7 @@ impl Broker {
                             for member_id in dead_members {
                                 group_lock.remove_member(&member_id);
                             }
-                            
-                            // 成员变化后，重新选举 Leader 并触发重平衡
-                            let _ = group_lock.leader_election();
-                            let _ = group_lock.rebalance();
+                            group_lock.rebalance();
                         }
                     }
                 }

@@ -1,16 +1,18 @@
-use std::{collections::HashMap, time::{Duration, Instant}};
+use std::{collections::{HashMap, HashSet}, time::{Duration, Instant}};
 use anyhow::Result;
 
-use crate::common::metadata::TopicPartition;
+use crate::common::metadata::{TopicMetadata, TopicPartition};
+use crate::broker::assignment::{AssignmentContext, AssignmentResult, PartitionAssignor};
 
-#[derive(Debug)]
-enum GroupState {
-    Pending,
+#[derive(Debug, PartialEq, Eq)]
+pub enum GroupState {
+    Empty,
+    PreparingRebalance,
     Rebalancing,
     Stable,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConsumerMember {
     pub id: String,
     pub session_timeout: Duration,
@@ -22,10 +24,11 @@ pub struct ConsumerMember {
 pub struct ConsumerGroup {
     pub name: String,
     pub members: HashMap<String, ConsumerMember>,
+    pub topics: HashSet<String>,
     pub offsets: HashMap<TopicPartition, i64>,
     pub state: GroupState,
-    pub leader_id: Option<String>,
     pub generation_id: u32,
+    pub strategy: String,
 }
 
 impl ConsumerGroup {
@@ -33,10 +36,11 @@ impl ConsumerGroup {
         Self {
             name,
             members: HashMap::new(),
+            topics: HashSet::new(),
             offsets: HashMap::new(),
-            state: GroupState::Pending,
-            leader_id: None,
+            state: GroupState::Empty,
             generation_id: 0,
+            strategy: "roundrobin".to_string(),
         }
     }
 
@@ -73,11 +77,39 @@ impl ConsumerGroup {
         Ok(())
     }
 
-    pub fn leader_election(&mut self) -> Result<String> {
-        todo!()
+    pub fn rebalance(&mut self) {
+        if !self.members.is_empty() {
+            self.state = GroupState::PreparingRebalance;
+        } else {
+            self.state = GroupState::Empty;
+        }
+
+        self.generation_id += 1;
     }
 
-    pub fn rebalance(&mut self) -> Result<u32> {
-        todo!()
+    pub fn assign(&mut self, assignor: &dyn PartitionAssignor, topic_metadata: &HashMap<String, TopicMetadata>) {
+        println!(
+            "Performing assignment for group '{}' with strategy '{}'", 
+            self.name, assignor.name()
+        );
+
+        let context = AssignmentContext {
+            members: &self.members,
+            topics: topic_metadata,
+        };
+
+        let result = assignor.assign(&context);
+
+        for member in self.members.values_mut() {
+            member.assignment.clear();
+        }
+
+        for (member_id, partitions) in result {
+            if let Some(member) = self.members.get_mut(&member_id) {
+                member.assignment = partitions;
+            }
+        }
+
+        self.state = GroupState::Stable;
     }
 }

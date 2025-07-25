@@ -86,7 +86,6 @@ pub struct JoinGroupResponse {
     pub error_code: Option<ErrorCode>,
     pub generation_id: u32,
     pub member_id: String,
-    pub leader_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

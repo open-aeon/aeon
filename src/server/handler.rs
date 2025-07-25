@@ -1,11 +1,10 @@
+use anyhow::Result;
+
 use crate::broker::Broker;
 use crate::common::metadata::TopicPartition;
-use crate::broker::consumer_group::ConsumerMember;
 use crate::error::StorageError;
 use crate::protocol::message::Message;
 use crate::protocol::*;
-use anyhow::Result;
-use std::time::Duration;
 
 pub async fn handle_request(request: Request, broker: &Broker) -> Result<Response> {
     let response = match request {
@@ -179,12 +178,11 @@ async fn handle_fetch_offset(req: FetchOffsetRequest, broker: &Broker) -> Result
 async fn handle_join_group(req: JoinGroupRequest, broker: &Broker) -> Result<Response> {
     let result = broker.join_group(req.group_id, req.member_id, req.session_timeout_ms).await;
     match result {
-        Ok((member_id, generation_id, leader_id)) => {
+        Ok((member_id, generation_id)) => {
             Ok(Response::JoinGroup(JoinGroupResponse {
                 error_code: None,
                 generation_id,
                 member_id,
-                leader_id,
             }))
         }
         Err(_e) => {
@@ -192,7 +190,6 @@ async fn handle_join_group(req: JoinGroupRequest, broker: &Broker) -> Result<Res
                 error_code: Some(ErrorCode::Unknown),
                 generation_id: 0,
                 member_id: "".to_string(),
-                leader_id: "".to_string(),
             }))
         }
     }

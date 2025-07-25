@@ -61,6 +61,7 @@ pub struct JoinGroupRequest {
     pub session_timeout_ms: u64,
     pub protocol_type: String,
     pub protocols: Vec<Protocol>,
+    pub topics: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
