@@ -49,7 +49,7 @@ impl Topic {
                 if partition_path.is_dir() {
                     if let Some(dir_name) = partition_path.file_name() {
                         if let Some(dir_name_str) = dir_name.to_str() {
-                            if let Ok(partition_id) = dir_name_str.parse::<u32>() {
+                            if let Ok(partition_id) = dir_name_str.trim_start_matches("partition_").parse::<u32>() {
                                 let partition = Partition::load(TopicPartition { topic: name.clone(), partition: partition_id }, partition_path, engine, config.clone())?;
                                 local_partitions.insert(partition_id, partition);
                             }

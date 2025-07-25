@@ -6,9 +6,8 @@ pub mod assignment;
 use anyhow::{Context, Result};
 use uuid::Uuid;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::broker::topic::Topic;
@@ -22,27 +21,47 @@ pub struct Broker {
     pub config: Arc<BrokerConfig>,
     pub storage_config: Arc<StorageConfig>,
     topics: Arc<RwLock<HashMap<String, Topic>>>,
-    data_dir: PathBuf,
     consumer_groups: Arc<RwLock<HashMap<String, Arc<RwLock<ConsumerGroup>>>>>,
+    brokers: BrokerMetadata,
+    shutdown_tx: Arc<Mutex<Option<tokio::sync::watch::Sender<()>>>>,
+}
+
+#[derive(Clone)]
+pub struct BrokerMetadata {
+    pub id: u32,
+    pub host: String,
+    pub port: u16,
 }
 
 impl Broker {
     pub fn new(config: BrokerConfig, storage_config: StorageConfig) -> Self {
-        let data_dir = config.data_dir.clone();
         let topics = Arc::new(RwLock::new(HashMap::new()));
         let consumer_groups = Arc::new(RwLock::new(HashMap::new()));
-        Self { config: Arc::new(config),storage_config: Arc::new(storage_config), topics, data_dir, consumer_groups }
+        let metadata = BrokerMetadata {
+            id: config.id,
+            host: config.advertised_host.clone(),
+            port: config.advertised_port,
+        };
+        Self { 
+            config: Arc::new(config),
+            storage_config: Arc::new(storage_config), 
+            topics, 
+            consumer_groups,
+            brokers: metadata,
+            shutdown_tx: Arc::new(Mutex::new(None)),
+        }
     }
 
     pub async fn start(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.data_dir)
-        .with_context(|| format!("Failed to create data directory at {:?}", &self.data_dir))?;
+        let data_dir = &self.config.data_dir;
+        std::fs::create_dir_all(data_dir)
+        .with_context(|| format!("Failed to create data directory at {:?}", data_dir))?;
 
-        println!("Starting broker, data directory at: {:?}", &self.data_dir);
+        println!("Starting broker, data directory at: {:?}", data_dir);
 
         let mut local_topics = HashMap::new();
 
-        for entry in std::fs::read_dir(&self.data_dir)? {
+        for entry in std::fs::read_dir(data_dir)? {
             let entry = entry?;
             let path = entry.path();
 
@@ -137,6 +156,10 @@ impl Broker {
         }
     }
 
+    pub fn metadata(&self) -> BrokerMetadata {
+        self.brokers.clone()
+    }
+
     pub async fn shutdown(&self) -> Result<()> {
         println!("Shutting down broker");
         let topics = self.topics.read().await;
@@ -154,7 +177,7 @@ impl Broker {
         }
 
         let engine = self.storage_config.engine;
-        let path = self.data_dir.join(&name);
+        let path = self.config.data_dir.join(&name);
         // todo: potential race condition here, to be fixed
         let topic = Topic::create(name.clone(), path, p_num, engine, &self.storage_config)?;
         self.topics.write().await.insert(name, topic);

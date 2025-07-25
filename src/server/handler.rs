@@ -101,6 +101,13 @@ async fn handle_metadata(req: MetadataRequest, broker: &Broker) -> Result<Respon
         req.topics
     };
 
+    let broker_metadata = broker.metadata();
+    let brokers = vec![BrokerMetadata{
+        id: broker_metadata.id,
+        host: broker_metadata.host,
+        port: broker_metadata.port,
+    }];
+
     let mut topics = Vec::new();
     for topic_name in requested_topics {
         if let Some(topic_meta) = topics_meta.get(&topic_name) {
@@ -120,7 +127,7 @@ async fn handle_metadata(req: MetadataRequest, broker: &Broker) -> Result<Respon
         }
     }
 
-    Ok(Response::Metadata(MetadataResponse { topics }))
+    Ok(Response::Metadata(MetadataResponse { topics, brokers }))
 }
 
 async fn handle_create_topic(req: CreateTopicRequest, broker: &Broker) -> Result<Response> {

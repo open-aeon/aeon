@@ -3,6 +3,9 @@ use std::path::PathBuf;
 
 #[derive(Debug,Serialize, Deserialize, Clone)]
 pub struct BrokerConfig {
+    pub id: u32,
+    pub advertised_host: String,
+    pub advertised_port: u16,
     pub data_dir: PathBuf,
 
     #[serde(default = "default_flush_interval")]

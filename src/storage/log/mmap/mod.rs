@@ -108,9 +108,9 @@ impl MmapLog {
 
         let mut segments = BTreeMap::new();
         for entry in fs::read_dir(&path)? {
-            let path = entry?.path();
-            if path.is_file() && path.extension().map_or(false, |s| s == "log") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            let file = entry?.path();
+            if file.is_file() && file.extension().map_or(false, |s| s == "log") {
+                if let Some(stem) = file.file_stem().and_then(|s| s.to_str()) {
                     if let Ok(base_offset) = stem.parse::<u64>() {
                         let segment = LogSegment::open(&path, base_offset, config.index_interval_bytes)?;
                         segments.insert(base_offset, segment);

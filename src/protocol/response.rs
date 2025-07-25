@@ -32,7 +32,15 @@ pub struct FetchResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MetadataResponse {
+    pub brokers: Vec<BrokerMetadata>,
     pub topics: Vec<TopicMetadata>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BrokerMetadata {
+    pub id: u32,
+    pub host: String,
+    pub port: u16,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
