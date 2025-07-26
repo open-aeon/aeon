@@ -16,18 +16,6 @@ pub enum ProtocolError {
     
     #[error("消息解码错误: {0}")]
     Decoding(String),
-
-    #[error("The group is not in a valid state for this operation.")]
-    InvalidState,
-
-    #[error("Member '{0}' not found in the group.")]
-    MemberNotFound(String),
-
-    #[error("No common protocol found among all members.")]
-    NoCommonProtocol,
-
-    #[error("Inconsistent protocol support among members.")]
-    InconsistentProtocols,
     
     #[error("其他错误: {0}")]
     Other(String),

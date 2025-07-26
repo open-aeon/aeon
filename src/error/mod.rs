@@ -3,6 +3,7 @@ use thiserror::Error;
 pub mod server;
 pub mod storage;
 pub mod protocol;
+pub mod consumer;
 
 pub use server::ServerError;
 pub use storage::StorageError;

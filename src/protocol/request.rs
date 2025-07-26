@@ -59,9 +59,9 @@ pub struct JoinGroupRequest {
     pub group_id: String,
     pub member_id: String,
     pub session_timeout_ms: u64,
-    pub protocol_type: String,
-    pub protocols: Vec<Protocol>,
+    pub rebalance_timeout_ms: u64,
     pub topics: Vec<String>,
+    pub supported_protocols: Vec<(String, Vec<u8>)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

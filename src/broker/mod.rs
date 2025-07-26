@@ -2,28 +2,30 @@ pub mod partition;
 pub mod topic;
 pub mod consumer_group;
 pub mod assignment;
+pub mod coordinator;
 
 use anyhow::{Context, Result};
-use uuid::Uuid;
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, Mutex};
-use std::time::{Duration, Instant};
+use tokio::sync::{RwLock, Mutex, mpsc, oneshot};
 
+use crate::broker::coordinator::{CorrdinatorCommand, GroupCoordinator, JoinGroupRequest};
 use crate::broker::topic::Topic;
 use crate::common::metadata::{TopicMetadata, TopicPartition};
 use crate::config::broker::BrokerConfig;
 use crate::config::storage::StorageConfig;
-use crate::broker::consumer_group::{ConsumerGroup, ConsumerMember};
+use crate::broker::consumer_group::ConsumerGroup;
 use crate::common::metadata::OffsetCommitMetadata;
+use crate::protocol::JoinGroupResult;
 
 pub struct Broker {
     pub config: Arc<BrokerConfig>,
     pub storage_config: Arc<StorageConfig>,
     topics: Arc<RwLock<HashMap<String, Topic>>>,
-    consumer_groups: Arc<RwLock<HashMap<String, Arc<RwLock<ConsumerGroup>>>>>,
-    brokers: BrokerMetadata,
+    metadata: BrokerMetadata,
     shutdown_tx: Arc<Mutex<Option<tokio::sync::watch::Sender<()>>>>,
+    coordinators: DashMap<String, mpsc::Sender<CorrdinatorCommand>>,
 }
 
 #[derive(Clone)]
@@ -36,7 +38,6 @@ pub struct BrokerMetadata {
 impl Broker {
     pub fn new(config: BrokerConfig, storage_config: StorageConfig) -> Self {
         let topics = Arc::new(RwLock::new(HashMap::new()));
-        let consumer_groups = Arc::new(RwLock::new(HashMap::new()));
         let metadata = BrokerMetadata {
             id: config.id,
             host: config.advertised_host.clone(),
@@ -46,9 +47,9 @@ impl Broker {
             config: Arc::new(config),
             storage_config: Arc::new(storage_config), 
             topics, 
-            consumer_groups,
-            brokers: metadata,
+            metadata: metadata,
             shutdown_tx: Arc::new(Mutex::new(None)),
+            coordinators: DashMap::new(),
         }
     }
 
@@ -94,10 +95,10 @@ impl Broker {
         }
 
         println!("Loading consumer offsets...");
-        let groups = self.load_offsets().await?;
-        println!("Loaded {} consumer groups", groups.len());
-
-        self.consumer_groups.write().await.extend(groups);
+        if let Err(e) = self.start_coordinators().await {
+            eprintln!("Failed to start coordinators: {}", e);
+            return Err(e.into());
+        }
 
         self.start_background_tasks();
 
@@ -107,7 +108,6 @@ impl Broker {
     fn start_background_tasks(&self) {
         self.start_flush_task();
         self.start_cleanup_task();
-        self.start_session_timeout_check_task();
     }
 
     fn start_flush_task(&self) {
@@ -157,7 +157,7 @@ impl Broker {
     }
 
     pub fn metadata(&self) -> BrokerMetadata {
-        self.brokers.clone()
+        self.metadata.clone()
     }
 
     pub async fn shutdown(&self) -> Result<()> {
@@ -240,86 +240,61 @@ impl Broker {
         Ok(meta)
     }
 
-    pub  async fn join_group(&self, group_id: String, member_id: String, session_timeout: u64) -> Result<(String, u32)> {
-        let mut groups = self.consumer_groups.write().await;
-        
-        let group = groups.entry(group_id.clone()).or_insert_with(|| Arc::new(RwLock::new(ConsumerGroup::new(group_id))));
-        let mut group_lock = group.write().await;
+    pub async fn join_group(
+        &self, 
+        group_id: String, 
+        member_id: String, 
+        session_timeout: u64,
+        rebalance_timeout: u64,
+        topics: Vec<String>,
+        supported_protocols: Vec<(String,Vec<u8>)>
+    ) -> Result<JoinGroupResult> {
+        let coordinator_tx = self.coordinators.entry(group_id.clone()).or_insert_with(|| {
+            GroupCoordinator::new(group_id.clone())
+        }).clone();
 
-        let new_member_id = if member_id.is_empty() {
-            Uuid::new_v4().to_string()
-        } else {
-            member_id
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let join_request = JoinGroupRequest {
+            group_id: group_id.clone(),
+            member_id,
+            session_timeout,
+            rebalance_timeout,
+            topics,
+            supported_protocols,
         };
 
-        let member = ConsumerMember {
-            id: new_member_id.clone(),
-            session_timeout: Duration::from_millis(session_timeout),
-            last_heartbeat: Instant::now(),
-            assignment: Vec::new(),
+        let command = CorrdinatorCommand::JoinGroup {
+            request: join_request,
+            response_tx,
         };
 
-        let is_new_member = group_lock.add_member(member);
-        if is_new_member {
-            group_lock.rebalance();
+        if coordinator_tx.send(command).await.is_err() {
+            self.coordinators.remove(&group_id);
+            return Err(anyhow::anyhow!("Failed to join group: {}", group_id));
         }
-        let generation_id = group_lock.generation_id;
 
-        Ok((new_member_id, generation_id))
+        match response_rx.await {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(e)) => Err(anyhow::anyhow!("Failed to join group: {}", e)),
+            Err(e) => Err(anyhow::anyhow!("Failed to join group: {}", e)),
+        }
     }
 
     pub async fn leave_group(&self, group_id: &str, member_id: &str) -> Result<()> {
-        let groups = self.consumer_groups.read().await;
-        if let Some(group) = groups.get(group_id) {
-            let mut group_lock = group.write().await;
-            group_lock.remove_member(member_id);
-        }
-
-        Ok(())
+        todo!();
     }
 
     pub async fn heartbeat(&self, group_id: &str, member_id: &str) -> Result<()> {
-        let groups = self.consumer_groups.read().await;
-        if let Some(group) = groups.get(group_id) {
-            let mut group_lock = group.write().await;
-            group_lock.heartbeat(member_id)?;
-        }
-        Ok(())
+        todo!()
     }
 
     pub async fn commit_offset(&self, group_id: String, tp: TopicPartition, offset: i64) -> Result<()> {
-        let message = OffsetCommitMetadata {
-            group_id: group_id,
-            topic: tp.topic.clone(),
-            partition: tp.partition,
-            offset,
-            timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-        };
-        self.persist_offset(&message).await?;
-
-        let group_arc : Arc<RwLock<ConsumerGroup>>;
-
-        {
-            let mut groups = self.consumer_groups.write().await;
-
-            let group = groups.entry(message.group_id.clone()).or_insert_with(|| Arc::new(RwLock::new(ConsumerGroup::new(message.group_id.clone()))));
-            group_arc = Arc::clone(group);
-        }
-        
-        let mut group_lock = group_arc.write().await;
-        group_lock.commit_offset(tp, offset);
-
-        Ok(())
+        todo!()
     }
 
     pub async fn fetch_offset(&self, group_id: &str, tp: &TopicPartition) -> Result<Option<i64>> {
-        let groups = self.consumer_groups.read().await;
-        if let Some(group) = groups.get(group_id) {
-            let group_lock = group.read().await;
-            Ok(group_lock.fetch_offset(tp))
-        } else {
-            Ok(None)
-        }
+        todo!()
     }
 
     async fn persist_offset(&self, metadata: &OffsetCommitMetadata) -> Result<()> {
@@ -336,8 +311,8 @@ impl Broker {
         Ok(())
     }
 
-    async fn load_offsets(&self) -> Result<HashMap<String, Arc<RwLock<ConsumerGroup>>>> {
-        let mut consumer_group: HashMap<String, ConsumerGroup> = HashMap::new();
+    async fn start_coordinators(&self) -> Result<()> {
+        let mut groups: HashMap<String, ConsumerGroup> = HashMap::new();
 
         for p in 0..self.config.internal_topic_partitions {
             let tp = TopicPartition {
@@ -350,13 +325,14 @@ impl Broker {
                 match self.read(&tp, current_offset).await {
                     Ok(data) => {
                         if let Ok(message) = bincode::deserialize::<OffsetCommitMetadata>(&data) {
-                            let group = consumer_group.entry(message.group_id.clone()).or_insert_with(||ConsumerGroup::new(message.group_id.clone()));
+                            let group = groups
+                                .entry(message.group_id.clone())
+                                .or_insert_with(|| ConsumerGroup::new(message.group_id.clone()));
 
                             let offset_tp = TopicPartition {
                                 topic: message.topic,
                                 partition: message.partition,
                             };
-
                             group.commit_offset(offset_tp, message.offset);
                         }
                         current_offset += 1;
@@ -364,68 +340,24 @@ impl Broker {
                     Err(e) => {
                         if let Some(err) = e.downcast_ref::<crate::error::StorageError>() {
                             if matches!(err, crate::error::StorageError::InvalidOffset) {
-                                break;
+                                break; // reach the end of the partition
                             }
                         }
-                        return Err(e);
+                        return Err(e.into());
                     }
                 }
             }
         }
 
-        let groups = consumer_group.into_iter().map(|(k, v)| (k, Arc::new(RwLock::new(v)))).collect();
-        Ok(groups)
-    }
+        println!("Loaded {} consumer groups from internal topic.", groups.len());
 
-    fn start_session_timeout_check_task(&self) {
-        if let Some(heartbeat_interval) = self.config.heartbeat_interval_ms {
-            let interval_duration = tokio::time::Duration::from_millis(heartbeat_interval);
-
-            let consumer_groups = self.consumer_groups.clone();
-
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(interval_duration);
-    
-                loop {
-                    interval.tick().await;
-    
-                    // 1. 获取所有消费组的ID列表
-                    // 我们在循环的开始获取一次读锁，拿到所有 group 的 Arc<RwLock> 的克隆。
-                    // 然后立即释放读锁，避免长时间持有。
-                    let groups_to_check: Vec<Arc<RwLock<ConsumerGroup>>> = {
-                        let groups_map = consumer_groups.read().await;
-                        groups_map.values().cloned().collect()
-                    }; // <-- 读锁在这里被释放
-    
-                    // 2. 遍历并检查每个组
-                    for group_arc in groups_to_check {
-                        let mut group_lock = group_arc.write().await; // 锁定单个组进行检查和修改
-    
-                        // 3. 找出所有超时的成员
-                        let mut dead_members = Vec::new();
-                        for member in group_lock.members.values() {
-                            if member.last_heartbeat.elapsed() > member.session_timeout {
-                                println!(
-                                    "Member {} in group {} timed out. Last heartbeat: {:?}, Session timeout: {:?}", 
-                                    member.id, group_lock.name, member.last_heartbeat, member.session_timeout
-                                );
-                                dead_members.push(member.id.clone());
-                            }
-                        }
-    
-                        // 4. 如果有成员超时，就将其移除并触发重平衡
-                        if !dead_members.is_empty() {
-                            println!("Group {} is rebalancing due to members timing out: {:?}", group_lock.name, dead_members);
-                            for member_id in dead_members {
-                                group_lock.remove_member(&member_id);
-                            }
-                            group_lock.rebalance();
-                        }
-                    }
-                }
-            });
-    
-            println!("Spawned session timeout checker task with interval: {:?}", interval_duration);
+        for (group_id, group) in groups {
+            println!("Starting coordinator for consumer group: {}", group_id);
+            let coordinator_tx = GroupCoordinator::with_state(group);
+            self.coordinators.insert(group_id, coordinator_tx);
         }
+
+        Ok(())
     }
+
 }
