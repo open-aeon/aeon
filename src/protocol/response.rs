@@ -92,8 +92,22 @@ pub struct TopicPartitionOffsetResult {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JoinGroupResponse {
     pub error_code: Option<ErrorCode>,
+    pub results: JoinGroupResult,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JoinGroupResult {
     pub generation_id: u32,
     pub member_id: String,
+    pub members: Vec<MemberInfo>,
+    pub protocol: Option<String>,
+    pub leader_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MemberInfo {
+    pub id: String,
+    pub metadata: Vec<u8>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

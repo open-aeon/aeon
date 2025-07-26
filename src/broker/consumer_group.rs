@@ -1,14 +1,15 @@
 use std::{collections::{HashMap, HashSet}, time::{Duration, Instant}};
 use anyhow::Result;
 
-use crate::common::metadata::{TopicMetadata, TopicPartition};
-use crate::broker::assignment::{AssignmentContext, AssignmentResult, PartitionAssignor};
+use crate::{common::metadata::{TopicMetadata, TopicPartition}};
+use crate::error::protocol::ProtocolError;
+use crate::protocol::response::{JoinGroupResult, MemberInfo};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum GroupState {
     Empty,
     PreparingRebalance,
-    Rebalancing,
+    CompletingRebalance,
     Stable,
 }
 
@@ -16,6 +17,9 @@ pub enum GroupState {
 pub struct ConsumerMember {
     pub id: String,
     pub session_timeout: Duration,
+    pub rebalance_timeout: Duration, // todo: 为什么要这个字段？
+    pub topics: Vec<String>,
+    pub supported_protocols: Vec<(String,Vec<u8>)>,
     pub last_heartbeat: Instant,
     pub assignment: Vec<TopicPartition>,
 }
@@ -23,25 +27,33 @@ pub struct ConsumerMember {
 #[derive(Debug)]
 pub struct ConsumerGroup {
     pub name: String,
-    pub members: HashMap<String, ConsumerMember>,
-    pub topics: HashSet<String>,
-    pub offsets: HashMap<TopicPartition, i64>,
     pub state: GroupState,
-    pub generation_id: u32,
-    pub strategy: String,
+    members: HashMap<String, ConsumerMember>,
+    offsets: HashMap<TopicPartition, i64>, //todo: 是否保留？
+    protocol: Option<String>,
+    generation_id: u32,
+    leader_id: Option<String>,
 }
 
 impl ConsumerGroup {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            members: HashMap::new(),
-            topics: HashSet::new(),
-            offsets: HashMap::new(),
             state: GroupState::Empty,
+            members: HashMap::new(),
+            offsets: HashMap::new(),
+            protocol: None,
             generation_id: 0,
-            strategy: "roundrobin".to_string(),
+            leader_id: None,
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    pub fn next_generation(&self) -> u32{
+        self.generation_id + 1
     }
 
     pub fn commit_offset(&mut self, tp: TopicPartition, offset: i64) {
@@ -59,7 +71,14 @@ impl ConsumerGroup {
     }
 
     pub fn remove_member(&mut self, member_id: &str) -> Option<ConsumerMember> {
-        self.members.remove(member_id)
+        let member = self.members.remove(member_id);
+        if member.is_some() {
+            self.state = GroupState::PreparingRebalance;
+        }
+        if self.members.is_empty() {
+            self.state = GroupState::Empty;
+        }
+        member
     }
 
     pub fn get_member(&self, member_id: &str) -> Option<&ConsumerMember> {
@@ -75,41 +94,5 @@ impl ConsumerGroup {
             member.last_heartbeat = Instant::now();
         }
         Ok(())
-    }
-
-    pub fn rebalance(&mut self) {
-        if !self.members.is_empty() {
-            self.state = GroupState::PreparingRebalance;
-        } else {
-            self.state = GroupState::Empty;
-        }
-
-        self.generation_id += 1;
-    }
-
-    pub fn assign(&mut self, assignor: &dyn PartitionAssignor, topic_metadata: &HashMap<String, TopicMetadata>) {
-        println!(
-            "Performing assignment for group '{}' with strategy '{}'", 
-            self.name, assignor.name()
-        );
-
-        let context = AssignmentContext {
-            members: &self.members,
-            topics: topic_metadata,
-        };
-
-        let result = assignor.assign(&context);
-
-        for member in self.members.values_mut() {
-            member.assignment.clear();
-        }
-
-        for (member_id, partitions) in result {
-            if let Some(member) = self.members.get_mut(&member_id) {
-                member.assignment = partitions;
-            }
-        }
-
-        self.state = GroupState::Stable;
     }
 }
