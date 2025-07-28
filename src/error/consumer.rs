@@ -13,4 +13,10 @@ pub enum ConsumerGroupError {
 
     #[error("Inconsistent protocol support among members.")]
     InconsistentProtocols,
+
+    #[error("Invalid generation ID. Expected {0}, got {1}.")]
+    InvalidGeneration(u32, u32),
+
+    #[error("Member '{0}' is not the leader.")]
+    NotLeader(String),
 }

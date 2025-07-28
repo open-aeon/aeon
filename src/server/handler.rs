@@ -17,6 +17,7 @@ pub async fn handle_request(request: Request, broker: &Broker) -> Result<Respons
         Request::JoinGroup(req) => handle_join_group(req, broker).await,
         Request::LeaveGroup(req) => handle_leave_group(req, broker).await,
         Request::Heartbeat(req) => handle_heartbeat(req, broker).await,
+        Request::SyncGroup(req) => handle_sync_group(req, broker).await,
     };
 
     // 统一错误处理
@@ -220,6 +221,7 @@ async fn handle_leave_group(req: LeaveGroupRequest, broker: &Broker) -> Result<R
         Err(_) => Some(ErrorCode::Unknown),
     };
     Ok(Response::LeaveGroup(LeaveGroupResponse {
+        result: LeaveGroupResult { error_code },
         error_code,
     }))
 }
@@ -230,5 +232,20 @@ async fn handle_heartbeat(req: HeartbeatRequest, broker: &Broker) -> Result<Resp
         Ok(_) => None,
         Err(_) => Some(ErrorCode::Unknown),
     };
-    Ok(Response::Heartbeat(HeartbeatResponse { error_code }))
+    Ok(Response::Heartbeat(HeartbeatResponse {
+        result: HeartbeatResult { error_code },
+        error_code,
+    }))
+}
+
+async fn handle_sync_group(req: SyncGroupRequest, broker: &Broker) -> Result<Response> {
+    let result = broker.sync_group(req.group_id, req.member_id, req.generation_id, req.assignment).await;
+    let error_code = match result {
+        Ok(_) => None,
+        Err(_) => Some(ErrorCode::Unknown),
+    };
+    Ok(Response::SyncGroup(SyncGroupResponse {
+        result: SyncGroupResult { assignment: vec![] },
+        error_code,
+    }))
 }

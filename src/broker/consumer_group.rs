@@ -1,9 +1,10 @@
-use std::{collections::{HashMap, HashSet}, time::{Duration, Instant}};
+use std::{collections::{HashMap}, time::{Duration, Instant}};
 use anyhow::Result;
+use tokio::sync::oneshot;
 
-use crate::{common::metadata::{TopicMetadata, TopicPartition}};
+use crate::common::metadata::TopicPartition;
 use crate::error::consumer::ConsumerGroupError;
-use crate::protocol::response::{JoinGroupResult, MemberInfo};
+use crate::protocol::response::{JoinGroupResult, MemberInfo, SyncGroupResult};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum GroupState {
@@ -21,7 +22,7 @@ pub struct ConsumerMember {
     pub topics: Vec<String>,
     pub supported_protocols: Vec<(String,Vec<u8>)>,
     pub last_heartbeat: Instant,
-    pub assignment: Vec<TopicPartition>,
+    pub assignment: Vec<(String, Vec<u32>)>,
 }
 
 #[derive(Debug)]
@@ -87,11 +88,13 @@ impl ConsumerGroup {
         &self.members
     }
 
-    pub fn heartbeat(&mut self, member_id: &str) -> Result<()> {
+    pub fn heartbeat(&mut self, member_id: &str) -> bool {
         if let Some(member) = self.members.get_mut(member_id) {
             member.last_heartbeat = Instant::now();
+            true
+        } else {
+            false
         }
-        Ok(())
     }
 
     pub fn complete_join_phase(&mut self) -> Result<HashMap<String, JoinGroupResult>, ConsumerGroupError> {
@@ -173,5 +176,44 @@ impl ConsumerGroup {
             self.leader_id = None;
             Err(ConsumerGroupError::NoCommonProtocol)
         }
+    }
+
+    pub fn transition_to(&mut self, state: GroupState) {
+        self.state = state;
+    }
+
+    pub fn get_all_assignments(&self) -> HashMap<String, Vec<(String, Vec<u32>)>> {
+        self.members.iter().map(|(m_id, m)| (m_id.clone(), m.assignment.clone())).collect()
+    }
+
+    pub fn apply_assignment(
+        &mut self,
+        leader_id: String,
+        generation_id: u32,
+        assignments: HashMap<String, Vec<(String, Vec<u32>)>>,
+    ) -> Result<(), ConsumerGroupError> {
+        if self.state != GroupState::CompletingRebalance {
+            return Err(ConsumerGroupError::InvalidState);
+        }
+
+        if self.generation_id != generation_id {
+            return Err(ConsumerGroupError::InvalidGeneration(generation_id, self.generation_id));
+        }
+
+        if self.leader_id.as_ref() != Some(&leader_id) {
+            return Err(ConsumerGroupError::NotLeader(leader_id));
+        }
+
+        for (member_id, assignment) in assignments {
+            if let Some(member) = self.members.get_mut(&member_id) {
+                member.assignment = assignment;
+            }
+        }
+        
+        Ok(())
+    }
+
+    pub fn all_members_synced(&self, pending_sync_responders: &HashMap<String, oneshot::Sender<Result<SyncGroupResult, ConsumerGroupError>>>) -> bool {
+        self.members.len() == pending_sync_responders.len()
     }
 }

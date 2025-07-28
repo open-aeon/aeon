@@ -12,6 +12,7 @@ pub enum Response {
     JoinGroup(JoinGroupResponse),
     LeaveGroup(LeaveGroupResponse),
     Heartbeat(HeartbeatResponse),
+    SyncGroup(SyncGroupResponse),
     Error(ErrorResponse),
 }
 
@@ -113,11 +114,34 @@ pub struct MemberInfo {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LeaveGroupResponse {
     pub error_code: Option<ErrorCode>,
+    pub result: LeaveGroupResult,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LeaveGroupResult {
+    pub error_code: Option<ErrorCode>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HeartbeatResponse {
     pub error_code: Option<ErrorCode>,
+    pub result: HeartbeatResult,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HeartbeatResult {
+    pub error_code: Option<ErrorCode>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SyncGroupResponse {
+    pub error_code: Option<ErrorCode>,
+    pub result: SyncGroupResult,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SyncGroupResult {
+    pub assignment: Vec<(String, Vec<u32>)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

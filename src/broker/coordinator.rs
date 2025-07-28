@@ -4,9 +4,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, Sleep};
 
+use crate::common::metadata::TopicPartition;
 use crate::error::consumer::ConsumerGroupError;
-use crate::protocol::response::JoinGroupResult;
-use crate::broker::consumer_group::{ConsumerGroup, ConsumerMember};
+use crate::protocol::response::{HeartbeatResult, JoinGroupResult, LeaveGroupResult, SyncGroupResult};
+use crate::broker::consumer_group::{ConsumerGroup, ConsumerMember, GroupState};
 
 pub struct JoinGroupRequest {
     pub group_id: String,
@@ -17,10 +18,57 @@ pub struct JoinGroupRequest {
     pub supported_protocols: Vec<(String, Vec<u8>)>
 }
 
-pub enum CorrdinatorCommand {
+pub struct LeaveGroupRequest {
+    pub group_id: String,
+    pub member_id: String,
+}
+
+pub struct HeartbeatRequest {
+    pub group_id: String,
+    pub member_id: String,
+}
+
+pub struct CommitOffsetRequest {
+    pub group_id: String,
+    pub tp: TopicPartition,
+    pub offset: i64,
+}
+
+pub struct FetchOffsetRequest {
+    pub group_id: String,
+    pub tp: TopicPartition,
+}
+
+pub struct SyncGroupRequest {
+    pub group_id: String,
+    pub member_id: String,
+    pub generation_id: u32,
+    pub assignment: HashMap<String, Vec<(String, Vec<u32>)>>,
+}
+
+pub enum CoordinatorCommand {
     JoinGroup{
         request: JoinGroupRequest,
         response_tx: oneshot::Sender<Result<JoinGroupResult, ConsumerGroupError>>,
+    },
+    LeaveGroup {
+        request: LeaveGroupRequest,
+        response_tx: oneshot::Sender<Result<LeaveGroupResult, ConsumerGroupError>>,
+    },
+    Heartbeat {
+        request: HeartbeatRequest,
+        response_tx: oneshot::Sender<Result<HeartbeatResult, ConsumerGroupError>>,
+    },
+    CommitOffset {
+        request: CommitOffsetRequest,
+    },
+    FetchOffset {
+        request: FetchOffsetRequest,
+        response_tx: oneshot::Sender<Result<Option<i64>, ConsumerGroupError>>,
+    },
+    SyncGroup {
+        request: SyncGroupRequest,
+        response_tx: oneshot::Sender<Result<SyncGroupResult, ConsumerGroupError>>,
     },
 }
 
@@ -29,36 +77,41 @@ pub struct GroupCoordinator {
     group: ConsumerGroup,
     
     /// channel to receive commands from the broker
-    command_rx : mpsc::Receiver<CorrdinatorCommand>,
+    command_rx : mpsc::Receiver<CoordinatorCommand>,
 
     /// timer for rebalance
     rebalance_timer: Option<Pin<Box<Sleep>>>,
 
     /// store the join group request that is not yet processed
-    pending_join_responder: HashMap<String, oneshot::Sender<Result<JoinGroupResult, ConsumerGroupError>>>,
+    pending_join_responders: HashMap<String, oneshot::Sender<Result<JoinGroupResult, ConsumerGroupError>>>,
+
+    /// store the sync group request that is not yet processed
+    pending_sync_responders: HashMap<String, oneshot::Sender<Result<SyncGroupResult, ConsumerGroupError>>>,
 }
 
 impl GroupCoordinator {
-    pub fn new(group_id: String) -> mpsc::Sender<CorrdinatorCommand> {
+    pub fn new(group_id: String) -> mpsc::Sender<CoordinatorCommand> {
         let (tx, rx) = mpsc::channel(100);
         let coordinator = GroupCoordinator {
             group: ConsumerGroup::new(group_id),
             command_rx: rx,
             rebalance_timer: None,
-            pending_join_responder: HashMap::new(),
+            pending_join_responders: HashMap::new(),
+            pending_sync_responders: HashMap::new(),
         };
 
         tokio::spawn(coordinator.run());
         tx
     }
 
-    pub fn with_state(group: ConsumerGroup) -> mpsc::Sender<CorrdinatorCommand> {
+    pub fn with_state(group: ConsumerGroup) -> mpsc::Sender<CoordinatorCommand> {
         let (tx, rx) = mpsc::channel(100);
         let coordinator = GroupCoordinator {
             group,
             command_rx: rx,
             rebalance_timer: None,
-            pending_join_responder: HashMap::new(),
+            pending_join_responders: HashMap::new(),
+            pending_sync_responders: HashMap::new(),
         };
 
         tokio::spawn(coordinator.run());
@@ -72,8 +125,25 @@ impl GroupCoordinator {
             tokio::select! {
                 Some(command) = self.command_rx.recv() => {
                     match command {
-                        CorrdinatorCommand::JoinGroup { request, response_tx } => {
+                        CoordinatorCommand::JoinGroup { request, response_tx } => {
                             self.handle_join_group(request, response_tx);
+                        }
+                        CoordinatorCommand::LeaveGroup { request, response_tx } => {
+                            self.handle_leave_group(request, response_tx);
+                        }
+                        CoordinatorCommand::Heartbeat { request, response_tx } => {
+                            self.handle_heartbeat(request, response_tx);
+                        }
+                        CoordinatorCommand::CommitOffset { request } => {
+                            self.handle_commit_offset(request);
+                        }
+                        CoordinatorCommand::FetchOffset { request, response_tx } => {
+                            self.handle_fetch_offset(request, response_tx);
+                        }
+                        CoordinatorCommand::SyncGroup { request, response_tx } => {
+                            if self.handle_sync_group(request, response_tx) {
+                                self.on_sync_complete();
+                            }
                         }
                     }
                 }
@@ -102,13 +172,57 @@ impl GroupCoordinator {
             assignment: vec![],
         };
         self.group.add_member(member);
-        self.pending_join_responder.insert(member_id, response_tx);
+        self.pending_join_responders.insert(member_id, response_tx);
 
         if self.rebalance_timer.is_none() {
             let timeout = Duration::from_millis(request.rebalance_timeout);
             self.rebalance_timer = Some(Box::pin(sleep(timeout)));
             println!("[Coordinator] Group '{}' rebalance started. Timeout: {:?}", self.group.name, timeout);
         }
+    }
+
+    fn handle_leave_group(&mut self, request: LeaveGroupRequest, response_tx: oneshot::Sender<Result<LeaveGroupResult, ConsumerGroupError>>) {
+        println!("[Coordinator] Member '{}' left group '{}'.", self.group.name, self.group.name);
+        self.group.remove_member(&request.member_id);
+        let _ = response_tx.send(Ok(LeaveGroupResult { error_code: None }));
+
+        if self.group.state == GroupState::PreparingRebalance && self.rebalance_timer.is_none() {
+            let timeout = Duration::from_millis(3000);
+            self.rebalance_timer = Some(Box::pin(sleep(timeout)));
+            println!("[Coordinator] Group '{}' rebalance started. Timeout: {:?}", self.group.name, timeout);
+        }
+    }
+
+    fn handle_heartbeat(&mut self, request: HeartbeatRequest, response_tx: oneshot::Sender<Result<HeartbeatResult, ConsumerGroupError>>) {
+        if self.group.heartbeat(&request.member_id) {
+            let _ = response_tx.send(Ok(HeartbeatResult { error_code: None }));
+        } else {
+            let _ = response_tx.send(Err(ConsumerGroupError::MemberNotFound(request.member_id)));
+        }
+    }
+
+    fn handle_commit_offset(&mut self, request: CommitOffsetRequest) {
+        self.group.commit_offset(request.tp, request.offset);
+    }
+
+    fn handle_fetch_offset(&mut self, request: FetchOffsetRequest, response_tx: oneshot::Sender<Result<Option<i64>, ConsumerGroupError>>) {
+        let offset = self.group.fetch_offset(&request.tp);
+        let _ = response_tx.send(Ok(offset));
+    }
+
+    fn handle_sync_group(&mut self, request: SyncGroupRequest, response_tx: oneshot::Sender<Result<SyncGroupResult, ConsumerGroupError>>) -> bool {
+        self.pending_sync_responders.insert(request.member_id.clone(), response_tx);
+
+        if !request.assignment.is_empty() {
+            if let Err(e) = self.group.apply_assignment(request.member_id, request.generation_id, request.assignment) {
+                for(_, responder) in self.pending_sync_responders.drain() {
+                    let _ = responder.send(Err(e.clone()));
+                }
+                return false;
+            }
+        }
+
+        self.group.all_members_synced(&self.pending_sync_responders)
     }
 
     async fn on_rebalance_timeout(&mut self) {
@@ -118,7 +232,7 @@ impl GroupCoordinator {
 
         match results {
             Ok(results_map) => {
-                for(member_id, responder) in self.pending_join_responder.drain() {
+                for(member_id, responder) in self.pending_join_responders.drain() {
                     if let Some(result) = results_map.get(&member_id) {
                         let _ = responder.send(Ok(result.clone()));
                     } else {
@@ -127,7 +241,7 @@ impl GroupCoordinator {
                 }
             }
             Err(e) => {
-                for(_, responder) in self.pending_join_responder.drain() {
+                for(_, responder) in self.pending_join_responders.drain() {
                     let _ = responder.send(Err(e.clone()));
                 }
             }
@@ -135,5 +249,20 @@ impl GroupCoordinator {
 
         self.rebalance_timer = None;
         println!("[Coordinator] Rebalance completed for group '{}'.", self.group.name);
+    }
+
+    fn on_sync_complete(&mut self) {
+        println!("[Coordinator] Sync completed for group '{}'.", self.group.name);
+        let assignments = self.group.get_all_assignments();
+
+        for (member_id, responder) in self.pending_sync_responders.drain() {
+            let member_assignment = assignments.get(&member_id).cloned().unwrap_or_default();
+            let result = SyncGroupResult {
+                assignment: member_assignment,
+            };
+            let _ = responder.send(Ok(result));
+        }
+
+        self.group.transition_to(GroupState::Stable);
     }
 }

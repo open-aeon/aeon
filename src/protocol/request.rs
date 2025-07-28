@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
 use crate::protocol::message::Message;
 use crate::common::metadata::{TopicPartitionOffset, TopicPartition};
 
@@ -13,6 +15,7 @@ pub enum Request {
     JoinGroup(JoinGroupRequest),
     LeaveGroup(LeaveGroupRequest),
     Heartbeat(HeartbeatRequest),
+    SyncGroup(SyncGroupRequest),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -80,4 +83,12 @@ pub struct LeaveGroupRequest {
 pub struct HeartbeatRequest {
     pub group_id: String,
     pub member_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SyncGroupRequest {
+    pub group_id: String,
+    pub member_id: String,
+    pub generation_id: u32,
+    pub assignment: HashMap<String, Vec<(String, Vec<u32>)>>,
 }
