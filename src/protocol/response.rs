@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::protocol::message::Message;
+use crate::common::metadata::TopicMetadata;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
@@ -42,20 +43,6 @@ pub struct BrokerMetadata {
     pub id: u32,
     pub host: String,
     pub port: u16,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TopicMetadata {
-    pub name: String,
-    pub partitions: Vec<PartitionMetadata>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PartitionMetadata {
-    pub id: u32,
-    pub leader: u32,
-    pub replicas: Vec<u32>,
-    pub isr: Vec<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

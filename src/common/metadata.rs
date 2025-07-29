@@ -15,12 +15,20 @@ pub struct TopicPartitionOffset {
 }
 
 /// 主题元数据信息
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TopicMetadata {
     pub name: String,
-    pub partition_count: u32,
-    pub replication_factor: u32,
+    pub partitions: Vec<PartitionMetadata>,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PartitionMetadata {
+    pub id: u32,
+    pub leader: u32,
+    pub replicas: Vec<u32>,
+    pub isr: Vec<u32>,
+}
+
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OffsetCommitMetadata {

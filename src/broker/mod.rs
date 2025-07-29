@@ -1,7 +1,6 @@
 pub mod partition;
 pub mod topic;
 pub mod consumer_group;
-pub mod assignment;
 pub mod coordinator;
 
 use anyhow::{Context, Result};

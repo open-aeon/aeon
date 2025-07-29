@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::broker::Broker;
-use crate::common::metadata::TopicPartition;
+use crate::common::metadata::{PartitionMetadata, TopicMetadata, TopicPartition};
 use crate::error::StorageError;
 use crate::protocol::message::Message;
 use crate::protocol::*;
@@ -112,9 +112,9 @@ async fn handle_metadata(req: MetadataRequest, broker: &Broker) -> Result<Respon
     let mut topics = Vec::new();
     for topic_name in requested_topics {
         if let Some(topic_meta) = topics_meta.get(&topic_name) {
-            let partitions = (0..topic_meta.partition_count)
+            let partitions = (0..topic_meta.partitions.len())
                 .map(|p_id| PartitionMetadata {
-                    id: p_id,
+                    id: p_id as u32,
                     leader: 0, // todo: hardcoded leader
                     replicas: vec![0],
                     isr: vec![0],

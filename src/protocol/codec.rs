@@ -8,7 +8,7 @@ pub trait Encodable {
     fn encode_to_vec(&self) -> Result<Vec<u8>, ProtocolError>;
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ClientCodec;
 
 impl Decoder for ClientCodec {

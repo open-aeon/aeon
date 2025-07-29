@@ -1,5 +1,5 @@
 use crate::broker::partition::Partition;
-use crate::common::metadata::{TopicMetadata, TopicPartition};
+use crate::common::metadata::{PartitionMetadata, TopicMetadata, TopicPartition};
 use crate::config::StorageConfig;
 use crate::storage::factory::StorageEngine;
 use anyhow::{anyhow, Context, Result};
@@ -193,10 +193,7 @@ impl Topic {
     }
 
     pub async fn meta(&self) -> TopicMetadata {
-        let partitions = self.partitions.read().await;
-        let partition_count = partitions.len() as u32;
-        let replication_factor = 1; // todo: hardcoded replication factor
-        TopicMetadata { name: self.name.clone(), partition_count, replication_factor }
+        todo!();
     }
 
 }
