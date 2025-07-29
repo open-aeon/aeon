@@ -120,6 +120,7 @@ impl GroupCoordinator {
 
     async fn run(mut self) {
         println!("[Coordinator] Starting coordinator for group: {}", self.group.name);
+        let mut heartbeat_check_timer = tokio::time::interval(Duration::from_millis(1000));
 
         loop {
             tokio::select! {
@@ -150,6 +151,10 @@ impl GroupCoordinator {
 
                 _ = async { self.rebalance_timer.as_mut().unwrap().await } => {
                     self.on_rebalance_timeout().await;
+                }
+
+                _ = heartbeat_check_timer.tick() => {
+                    self.check_session_timeouts();
                 }
 
                 else => {
@@ -186,11 +191,7 @@ impl GroupCoordinator {
         self.group.remove_member(&request.member_id);
         let _ = response_tx.send(Ok(LeaveGroupResult { error_code: None }));
 
-        if self.group.state == GroupState::PreparingRebalance && self.rebalance_timer.is_none() {
-            let timeout = Duration::from_millis(3000);
-            self.rebalance_timer = Some(Box::pin(sleep(timeout)));
-            println!("[Coordinator] Group '{}' rebalance started. Timeout: {:?}", self.group.name, timeout);
-        }
+        self.trigger_rebalance_if_needed();
     }
 
     fn handle_heartbeat(&mut self, request: HeartbeatRequest, response_tx: oneshot::Sender<Result<HeartbeatResult, ConsumerGroupError>>) {
@@ -264,5 +265,44 @@ impl GroupCoordinator {
         }
 
         self.group.transition_to(GroupState::Stable);
+    }
+
+    fn check_session_timeouts(&mut self) {
+        let now = Instant::now();
+        
+        let timeout_member_ids: Vec<String> = self.group.get_members().values()
+            .filter(|m| now.duration_since(m.last_heartbeat) > m.session_timeout)
+            .map(|m| m.id.clone()).collect();
+
+        if timeout_member_ids.is_empty() {
+            return;
+        }
+
+        println!("[Coordinator] Session timeout for members: {:?}", timeout_member_ids);
+
+        for member_id in timeout_member_ids {
+            self.group.remove_member(&member_id);
+        }
+
+        self.trigger_rebalance_if_needed();
+    }
+
+    fn trigger_rebalance_if_needed(&mut self) {
+        if self.group.state == GroupState::CompletingRebalance && self.rebalance_timer.is_none() {
+            self.fail_all_pending_responders(ConsumerGroupError::RebalanceInProgress);
+
+            let timeout = Duration::from_millis(3000);
+            self.rebalance_timer = Some(Box::pin(sleep(timeout)));
+            println!("[Coordinator] Group '{}' rebalance started. Timeout: {:?}", self.group.name, timeout);
+        }
+    }
+
+    fn fail_all_pending_responders(&mut self, error: ConsumerGroupError) {
+        for(_, responder) in self.pending_join_responders.drain() {
+            let _ = responder.send(Err(error.clone()));
+        }
+        for(_, responder) in self.pending_sync_responders.drain() {
+            let _ = responder.send(Err(error.clone()));
+        }
     }
 }

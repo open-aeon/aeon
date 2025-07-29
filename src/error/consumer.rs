@@ -19,4 +19,7 @@ pub enum ConsumerGroupError {
 
     #[error("Member '{0}' is not the leader.")]
     NotLeader(String),
+
+    #[error("Rebalance is already in progress.")]
+    RebalanceInProgress,
 }
