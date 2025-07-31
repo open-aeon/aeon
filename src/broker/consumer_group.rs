@@ -4,7 +4,56 @@ use tokio::sync::oneshot;
 
 use crate::common::metadata::TopicPartition;
 use crate::error::consumer::ConsumerGroupError;
-use crate::protocol::response::{JoinGroupResult, MemberInfo, SyncGroupResult};
+
+#[derive(Clone, Debug)]
+pub struct JoinGroupResult {
+    pub generation_id: u32,
+    pub member_id: String,
+    pub members: Vec<MemberInfo>,
+    pub protocol: Option<String>,
+    pub leader_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct MemberInfo {
+    pub id: String,
+    pub metadata: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub struct LeaveGroupResult {}
+
+#[derive(Debug)]
+pub struct HeartbeatResult {}
+
+#[derive(Debug)]
+pub struct CommitOffsetResponse {
+    pub results: Vec<TopicPartitionResult>,
+}
+
+#[derive(Debug)]
+pub struct TopicPartitionResult {
+    pub topic: String,
+    pub partition: u32,
+}
+
+#[derive(Debug)]
+pub struct FetchOffsetResponse {
+    pub results: Vec<TopicPartitionOffsetResult>,
+}
+
+#[derive(Debug)]
+pub struct TopicPartitionOffsetResult {
+    pub topic: String,
+    pub partition: u32,
+    pub offset: i64,
+}
+
+#[derive(Debug)]
+pub struct SyncGroupResult {
+    pub assignment: Vec<(String, Vec<u32>)>,
+}
+
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum GroupState {

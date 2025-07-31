@@ -1,6 +1,6 @@
 pub mod broker;
 pub mod common;
-pub mod protocol;
+pub mod kafka;
 pub mod server;
 pub mod storage; 
 pub mod error;

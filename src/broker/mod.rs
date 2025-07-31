@@ -4,19 +4,20 @@ pub mod consumer_group;
 pub mod coordinator;
 
 use anyhow::{Context, Result};
+use tokio::sync::watch;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, Mutex, mpsc, oneshot};
 
 use crate::broker::coordinator::*;
+use crate::broker::consumer_group::*;
 use crate::broker::topic::Topic;
 use crate::common::metadata::{TopicMetadata, TopicPartition};
 use crate::config::broker::BrokerConfig;
 use crate::config::storage::StorageConfig;
 use crate::broker::consumer_group::ConsumerGroup;
 use crate::common::metadata::OffsetCommitMetadata;
-use crate::protocol::{JoinGroupResult, SyncGroupResult};
 
 pub struct Broker {
     pub config: Arc<BrokerConfig>,
@@ -53,6 +54,9 @@ impl Broker {
     }
 
     pub async fn start(&self) -> Result<()> {
+        let(tx, _) = watch::channel(());
+        *self.shutdown_tx.lock().await = Some(tx);
+
         let data_dir = &self.config.data_dir;
         std::fs::create_dir_all(data_dir)
         .with_context(|| format!("Failed to create data directory at {:?}", data_dir))?;
@@ -99,60 +103,94 @@ impl Broker {
             return Err(e.into());
         }
 
-        self.start_background_tasks();
+        self.start_background_tasks().await?;
 
         Ok(())
     }
 
-    fn start_background_tasks(&self) {
-        self.start_flush_task();
-        self.start_cleanup_task();
+    async fn subscribe_shutdown(&self) -> Result<watch::Receiver<()>> {
+        let tx = self.shutdown_tx.lock().await;
+        if let Some(tx) = tx.as_ref() {
+            Ok(tx.subscribe())
+        } else {
+            Err(anyhow::anyhow!("Shutdown channel not initialized"))
+        }
     }
 
-    fn start_flush_task(&self) {
+    pub async fn initiate_shutdown(&self) {
+        if self.shutdown_tx.lock().await.take().is_none() {
+            eprintln!("[Broker] Shutdown already initiated");
+        }
+    }
+
+    async fn start_background_tasks(&self) -> Result<()> {
+        self.start_flush_task().await?;
+        self.start_cleanup_task().await?;
+        Ok(())
+    }
+
+    async fn start_flush_task(&self) -> Result<()> {
         if let Some(flush_interval) = self.config.flush_interval_ms {
             let topics = self.topics.clone();
             let interval_duration = tokio::time::Duration::from_millis(flush_interval);
+            let mut shutdown_rx = self.subscribe_shutdown().await?;
 
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(interval_duration);
 
                 loop {
-                    interval.tick().await;
-
-                    let topics = topics.read().await;
-                    for topic in topics.values() {
-                        if let Err(e) = topic.flush_all().await {
-                            eprintln!("Failed to flush topic {}: {}", topic.name, e);
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            let topics = topics.read().await;
+                            for topic in topics.values() {
+                                if let Err(e) = topic.flush_all().await {
+                                    eprintln!("Failed to flush topic {}: {}", topic.name, e);
+                                }
+                            }
+                        }
+                        _ = shutdown_rx.changed() => {
+                            println!("[Broker] Received shutdown signal, exiting...");
+                            break;
                         }
                     }
+
+                    
                 }
             });
             println!("Spawned periodic flush task with interval: {:?}", interval_duration);
         }
+        Ok(())
     }
 
-    fn start_cleanup_task(&self) {
+    async fn start_cleanup_task(&self) -> Result<()> {
         if let Some(cleanup_interval) = self.config.cleanup_interval_ms {
             let topics = self.topics.clone();
             let interval_duration = tokio::time::Duration::from_millis(cleanup_interval);
+            let mut shutdown_rx = self.subscribe_shutdown().await?;
 
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(interval_duration);
                 
                 loop {
-                    interval.tick().await;
-
-                    let topics = topics.read().await;
-                    for topic in topics.values() {
-                        if let Err(e) = topic.cleanup().await {
-                            eprintln!("Failed to cleanup topic {}: {}", topic.name, e);
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            let topics = topics.read().await;
+                            for topic in topics.values() {
+                                if let Err(e) = topic.cleanup().await {
+                                    eprintln!("Failed to cleanup topic {}: {}", topic.name, e);
+                                }
+                            }
+                        }
+                        _ = shutdown_rx.changed() => {
+                            println!("[Broker] Received shutdown signal, exiting...");
+                            break;
                         }
                     }
                 }
             });
             println!("Spawned periodic cleanup task with interval: {:?}", interval_duration);
         }
+        Ok(())
     }
 
     pub fn metadata(&self) -> BrokerMetadata {
@@ -230,7 +268,18 @@ impl Broker {
         }
     }
 
-    pub async fn get_topics_meta(&self) -> Result<HashMap<String, TopicMetadata>> {
+    pub async fn get_topics_metadata(&self, topics: &[String]) -> Result<HashMap<String, TopicMetadata>> {
+        let all_topics = self.topics.read().await;
+        let mut meta = HashMap::new();
+        for topic_name in topics {
+            if let Some(topic) = all_topics.get(topic_name) {
+                meta.insert(topic_name.clone(), topic.meta().await);
+            }
+        }
+        Ok(meta)
+    }
+
+    pub async fn get_all_topics_metadata(&self) -> Result<HashMap<String, TopicMetadata>> {
         let topics = self.topics.read().await;
         let mut meta = HashMap::new();
         for (name, topic) in topics.iter() {
@@ -241,30 +290,17 @@ impl Broker {
 
     pub async fn join_group(
         &self, 
-        group_id: String, 
-        member_id: String, 
-        session_timeout: u64,
-        rebalance_timeout: u64,
-        topics: Vec<String>,
-        supported_protocols: Vec<(String,Vec<u8>)>
+        request: JoinGroupRequest
     ) -> Result<JoinGroupResult> {
+        let group_id = request.group_id.clone();
         let coordinator_tx = self.coordinators.entry(group_id.clone()).or_insert_with(|| {
             GroupCoordinator::new(group_id.clone())
         }).clone();
 
         let (response_tx, response_rx) = oneshot::channel();
 
-        let join_request = JoinGroupRequest {
-            group_id: group_id.clone(),
-            member_id,
-            session_timeout,
-            rebalance_timeout,
-            topics,
-            supported_protocols,
-        };
-
         let command = CoordinatorCommand::JoinGroup {
-            request: join_request,
+            request,
             response_tx,
         };
 
@@ -280,21 +316,18 @@ impl Broker {
         }
     }
 
-    pub async fn leave_group(&self, group_id: &str, member_id: &str) -> Result<()> {
-        if let Some(coordinator_tx) = self.coordinators.get(group_id) {
+    pub async fn leave_group(&self, request: LeaveGroupRequest) -> Result<()> {
+        let group_id = request.group_id.clone();
+        if let Some(coordinator_tx) = self.coordinators.get(&group_id) {
             let (response_tx, response_rx) = oneshot::channel();
-            let leave_request = LeaveGroupRequest {
-                group_id: group_id.to_string(),
-                member_id: member_id.to_string(),
-            };
 
             let command = CoordinatorCommand::LeaveGroup {
-                request: leave_request,
+                request,
                 response_tx,
             };
 
             if coordinator_tx.send(command).await.is_err() {
-                self.coordinators.remove(group_id);
+                self.coordinators.remove(&group_id);
                 return Err(anyhow::anyhow!("Failed to leave group: {}", group_id));
             }
 
@@ -308,21 +341,18 @@ impl Broker {
         }
     }
 
-    pub async fn heartbeat(&self, group_id: &str, member_id: &str) -> Result<()> {
-        if let Some(coordinator_tx) = self.coordinators.get(group_id) {
+    pub async fn heartbeat(&self, request: HeartbeatRequest) -> Result<()> {
+        let group_id = request.group_id.clone();
+        if let Some(coordinator_tx) = self.coordinators.get(&group_id) {
             let (response_tx, response_rx) = oneshot::channel();
-            let heartbeat_request = HeartbeatRequest {
-                group_id: group_id.to_string(),
-                member_id: member_id.to_string(),
-            };
 
             let command = CoordinatorCommand::Heartbeat {
-                request: heartbeat_request,
+                request,
                 response_tx,
             };
 
             if coordinator_tx.send(command).await.is_err() {
-                self.coordinators.remove(group_id);
+                self.coordinators.remove(&group_id);
                 return Err(anyhow::anyhow!("Failed to send heartbeat command to coordinator: {}", group_id));
             }
             
@@ -336,12 +366,14 @@ impl Broker {
         }
     }
 
-    pub async fn commit_offset(&self, group_id: String, tp: TopicPartition, offset: i64) -> Result<()> {
+    pub async fn commit_offset(&self, request: CommitOffsetRequest) -> Result<()> {
+        let group_id = request.group_id.clone();
+
         let message = OffsetCommitMetadata {
             group_id: group_id.clone(),
-            topic: tp.topic.clone(),
-            partition: tp.partition,
-            offset,
+            topic: request.tp.topic.clone(),
+            partition: request.tp.partition,
+            offset: request.offset,
             timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
         };
 
@@ -350,14 +382,8 @@ impl Broker {
         let coordinator_tx = self.coordinators.entry(group_id.clone()).or_insert_with(||
             GroupCoordinator::new(group_id.clone())).clone();
 
-        let commit_request = CommitOffsetRequest {
-            group_id: group_id.clone(),
-            tp,
-            offset,
-        };
-
         let command = CoordinatorCommand::CommitOffset {
-            request: commit_request,
+            request,
         };
 
         if coordinator_tx.send(command).await.is_err() {
@@ -367,21 +393,18 @@ impl Broker {
         Ok(())
     }
 
-    pub async fn fetch_offset(&self, group_id: &str, tp: &TopicPartition) -> Result<Option<i64>> {
-        if let Some(coordinator_tx) = self.coordinators.get(group_id) {
+    pub async fn fetch_offset(&self, request: FetchOffsetRequest) -> Result<Option<i64>> {
+        let group_id = request.group_id.clone();
+        if let Some(coordinator_tx) = self.coordinators.get(&group_id) {
             let (response_tx, response_rx) = oneshot::channel();
-            let fetch_request = FetchOffsetRequest {
-                group_id: group_id.to_string(),
-                tp: tp.clone(),
-            };
 
             let command = CoordinatorCommand::FetchOffset {
-                request: fetch_request,
+                request,
                 response_tx,
             };
 
             if coordinator_tx.send(command).await.is_err() {
-                self.coordinators.remove(group_id);
+                self.coordinators.remove(&group_id);
                 return Err(anyhow::anyhow!("Failed to send fetch offset command to coordinator: {}", group_id));
             }
 
@@ -397,20 +420,11 @@ impl Broker {
 
     pub async fn sync_group(
         &self,
-        group_id: String,
-        member_id: String,
-        generation_id: u32,
-        assignment: HashMap<String, Vec<(String, Vec<u32>)>>
+        request: SyncGroupRequest
     ) -> Result<SyncGroupResult> {
+        let group_id = request.group_id.clone();
         if let Some(coordinator_tx) = self.coordinators.get(&group_id) {
             let (response_tx, response_rx) = oneshot::channel();
-
-            let request = SyncGroupRequest {
-                group_id: group_id.clone(),
-                member_id: member_id.clone(),
-                generation_id,
-                assignment,
-            };
 
             let command = CoordinatorCommand::SyncGroup {
                 request,

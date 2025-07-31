@@ -2,7 +2,7 @@ use anyhow::Result;
 use bifrost::broker::Broker;
 use bifrost::config::Config;
 use bifrost::server::Server;
-use bifrost::protocol::{CreateTopicRequest, ProduceRequest, FetchRequest, message::Message};
+use bifrost::kafka::{CreateTopicRequest, ProduceRequest, FetchRequest, message::Message};
 use bifrost_client::Client;
 use std::sync::Arc;
 use tempfile::TempDir;

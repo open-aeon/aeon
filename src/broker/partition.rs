@@ -66,4 +66,21 @@ impl Partition {
         let log = self.log.into_inner();
         log.delete().await
     }
+
+    pub fn leader(&self) -> u32 {
+        0
+    }
+
+    pub fn replicas(&self) -> Vec<u32> {
+        vec![0]
+    }
+
+    pub fn isr(&self) -> Vec<u32> {
+        vec![0]
+    }
+
+    pub fn leader_epoch(&self) -> i32 {
+        0
+    }
+    
 }

@@ -193,7 +193,22 @@ impl Topic {
     }
 
     pub async fn meta(&self) -> TopicMetadata {
-        todo!();
+        let partitions_map = self.partitions.read().await;
+        let partitions_meta = partitions_map.iter()
+            .map(|(id,partition)| {
+                let meta = PartitionMetadata {
+                    leader: partition.leader(),
+                    replicas: partition.replicas(),
+                    isr: partition.isr(),
+                    leader_epoch: partition.leader_epoch(),
+                };
+                (*id, meta)
+            }).collect();
+
+        TopicMetadata {
+            name: self.name.clone(),
+            partitions: partitions_meta,
+        }
     }
 
 }

@@ -6,8 +6,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use rand::seq::SliceRandom;
 
-use bifrost::protocol::{Request, Response, MetadataRequest};
-use bifrost::protocol::codec::ClientCodec;
+use bifrost::kafka::{Request, Response, MetadataRequest};
+use bifrost::kafka::codec::ClientCodec;
 use bifrost::common::metadata::TopicMetadata;
 use crate::error::ClientError;
 

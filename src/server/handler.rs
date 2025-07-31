@@ -1,59 +1,177 @@
 use anyhow::Result;
+use std::collections::HashMap;
 
 use crate::broker::Broker;
-use crate::common::metadata::{PartitionMetadata, TopicMetadata, TopicPartition};
-use crate::error::StorageError;
-use crate::protocol::message::Message;
-use crate::protocol::*;
+use crate::common::metadata::TopicPartition;
+use crate::kafka::codec::{CompactVec, Encode};
+use crate::kafka::request::{Request, RequestType};
+use crate::kafka::response::{
+    ApiKey, ApiVersionsResponse, Broker as KafkaBroker, MetadataResponse, Partition as KafkaPartition,
+    ProduceResponse, Response, ResponseHeader, ResponseType, Topic as KafkaTopic,
+};
+use crate::kafka::*;
 
+// todo: broker是否可以换为&Arc<Broker>
 pub async fn handle_request(request: Request, broker: &Broker) -> Result<Response> {
-    let response = match request {
-        Request::Produce(req) => handle_produce(req, broker).await,
-        Request::Fetch(req) => handle_fetch(req, broker).await,
-        Request::Metadata(req) => handle_metadata(req, broker).await,
-        Request::CreateTopic(req) => handle_create_topic(req, broker).await,
-        Request::CommitOffset(req) => handle_commit_offset(req, broker).await,
-        Request::FetchOffset(req) => handle_fetch_offset(req, broker).await,
-        Request::JoinGroup(req) => handle_join_group(req, broker).await,
-        Request::LeaveGroup(req) => handle_leave_group(req, broker).await,
-        Request::Heartbeat(req) => handle_heartbeat(req, broker).await,
-        Request::SyncGroup(req) => handle_sync_group(req, broker).await,
+    let correlation_id = request.header.correlation_id;
+    let api_key = request.header.api_key;
+    let api_version = request.header.api_version;
+    
+    let response_type = match request.request_type {
+        RequestType::ApiVersions(_req) => handle_api_versions(_req, broker).await?,
+        RequestType::Metadata(req) => handle_metadata(req, broker).await?,
+        RequestType::Produce(req) => handle_produce(req, broker).await?,
     };
 
-    // 统一错误处理
-    response.or_else(|e| {
-        // 在这里可以根据错误类型映射到不同的 ErrorCode
-        let err_resp = ErrorResponse {
-            code: ErrorCode::Unknown,
-            message: e.to_string(),
-        };
-        Ok(Response::Error(err_resp))
+    Ok(Response {
+        header: ResponseHeader {
+            correlation_id,
+        },
+        response_type,
+        api_key,
+        api_version,
     })
 }
 
-async fn handle_produce(req: ProduceRequest, broker: &Broker) -> Result<Response> {
-    let tp = TopicPartition {
-        topic: req.topic.clone(),
-        partition: req.partition,
+async fn handle_api_versions(_: ApiVersionsRequest, _: &Broker) -> Result<ResponseType> {
+    // 返回服务器支持的所有API版本
+    let response = ApiVersionsResponse {
+        error_code: 0,
+        api_keys: vec![
+            // Produce API
+            ApiKey { key: 0, min_version: 0, max_version: 9 },
+            // Metadata API  
+            ApiKey { key: 3, min_version: 0, max_version: 9 },
+            // ApiVersions API
+            ApiKey { key: 18, min_version: 2, max_version: 3 },
+        ],
+        throttle_time_ms: 0,
     };
-
-   let message_content : Vec<Vec<u8>> = req.messages.iter().map(|m| m.content.clone()).collect();
-   if message_content.is_empty() {
-        return Ok(Response::Produce(ProduceResponse{
-            topic: req.topic,
-            partition: req.partition,
-            base_offset: 0,
-        }));
-   }
-   let last_offset = broker.append_batch(&tp, &message_content).await?;
-
-    Ok(Response::Produce(ProduceResponse {
-        topic: req.topic,
-        partition: req.partition,
-        base_offset: last_offset,
-    }))
+    Ok(ResponseType::ApiVersions(response))
 }
 
+async fn handle_metadata(req: MetadataRequest, broker: &Broker) -> Result<ResponseType> {
+    let topics_meta = if let Some(topics) = &req.topics {
+        broker.get_topics_metadata(&topics[..]).await?
+    } else {
+        broker.get_all_topics_metadata().await?
+    };
+    
+    let kafka_topics = topics_meta.into_iter().map(|(topic_name, topic_meta)| {
+        let partitions = topic_meta.partitions.into_iter().map(|(partition_id, partition_meta)| {
+            KafkaPartition {
+                error_code: 0,
+                partition_index: partition_id as i16,
+                leader_id: partition_meta.leader as i32,
+                leader_epoch: partition_meta.leader_epoch,
+                replica_nodes: partition_meta.replicas.into_iter().map(|r| r as i32).collect(),
+                isr_nodes: partition_meta.isr.into_iter().map(|i| i as i32).collect(),
+                offline_replicas: Vec::new(),
+            }
+        }).collect();
+
+        KafkaTopic {
+            error_code: 0,
+            name: topic_name,
+            is_internal: false,
+            partitions,
+        }
+    }).collect();
+
+    let response = MetadataResponse {
+        throttle_time_ms: 0,
+        brokers: vec![KafkaBroker {
+            node_id: 0,
+            host: "localhost".to_string(),
+            port: 8080,
+            rack: None,
+        }],
+        cluster_id: Some("bifrost-cluster".to_string()),
+        controller_id: 0,
+        topics: kafka_topics,
+    };
+    Ok(ResponseType::Metadata(response))
+}
+
+async fn handle_produce(req: ProduceRequest, broker: &Broker) -> Result<ResponseType> {
+    let mut response_topics = HashMap::new();
+    for (topic_name, topic_data) in req.topics {
+        let mut partition_responses = Vec::new();
+        for p_data in topic_data.partitions {
+            let tp = TopicPartition {
+                topic: topic_name.clone(),
+                partition: p_data.index as u32,
+            };
+            
+            let messages : std::result::Result<Vec<Vec<u8>>, _> = p_data.records.records
+                .iter().map(|record| record.encode_to_vec()).collect();
+            let message_to_store = match messages {
+                Ok(messages) => messages,
+                Err(e) => {
+                    eprintln!("FATAL: Failed to encode record for storage: {}", e);
+                    partition_responses.push(PartitionProduceResponse{
+                        partition_index: p_data.index,
+                        error_code: 1,
+                        base_offset: -1,
+                        log_append_time_ms: 0,
+                        log_start_offset: 0,
+                    });
+                    continue;
+                }
+            };
+            
+            if message_to_store.is_empty() {
+                partition_responses.push(PartitionProduceResponse{
+                    partition_index: p_data.index,
+                    error_code: 1,
+                    base_offset: -1,
+                    log_append_time_ms: 0,
+                    log_start_offset: 0,
+                });
+                continue;
+            }
+
+            match broker.append_batch(&tp, &message_to_store).await {
+                Ok(offset) => {
+                    let num_messages = message_to_store.len() as u64;
+                    let base_offset = if num_messages > 0 {
+                        offset - (num_messages - 1)
+                    } else {
+                        offset
+                    };
+                    partition_responses.push(PartitionProduceResponse{
+                        partition_index: p_data.index,
+                        error_code: 0,
+                        base_offset: base_offset as i64,
+                        log_append_time_ms: 0,
+                        log_start_offset: 0,
+                    });
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Error appending batch for topic {}-{}: {}",
+                        topic_name, p_data.index, e
+                    );
+                    partition_responses.push(PartitionProduceResponse {
+                        partition_index: p_data.index,
+                        error_code: 3, // 3 = UNKNOWN_TOPIC_OR_PARTITION, a safe default
+                        base_offset: -1,
+                        log_append_time_ms: 0,
+                        log_start_offset: 0,
+                    });
+                }
+            }
+        }
+        response_topics.insert(topic_name, TopicProduceResponse {
+            partitions: partition_responses,
+        });
+    }
+    Ok(ResponseType::Produce(ProduceResponse {
+        topic_data: response_topics,
+        throttle_time_ms: 0,
+    }))
+}
+/* 
 async fn handle_fetch(req: FetchRequest, broker: &Broker) -> Result<Response> {
     let tp = TopicPartition {
         topic: req.topic.clone(),
@@ -94,42 +212,42 @@ async fn handle_fetch(req: FetchRequest, broker: &Broker) -> Result<Response> {
     Ok(Response::Fetch(response))
 }
 
-async fn handle_metadata(req: MetadataRequest, broker: &Broker) -> Result<Response> {
-    let topics_meta = broker.get_topics_meta().await?;
-    let requested_topics = if req.topics.is_empty() {
-        topics_meta.keys().cloned().collect()
-    } else {
-        req.topics
-    };
+// async fn handle_metadata(req: MetadataRequest, broker: &Broker) -> Result<Response> {
+//     let topics_meta = broker.get_topics_meta().await?;
+//     let requested_topics = if req.topics.is_empty() {
+//         topics_meta.keys().cloned().collect()
+//     } else {
+//         req.topics
+//     };
 
-    let broker_metadata = broker.metadata();
-    let brokers = vec![BrokerMetadata{
-        id: broker_metadata.id,
-        host: broker_metadata.host,
-        port: broker_metadata.port,
-    }];
+//     let broker_metadata = broker.metadata();
+//     let brokers = vec![BrokerMetadata{
+//         id: broker_metadata.id,
+//         host: broker_metadata.host,
+//         port: broker_metadata.port,
+//     }];
 
-    let mut topics = Vec::new();
-    for topic_name in requested_topics {
-        if let Some(topic_meta) = topics_meta.get(&topic_name) {
-            let partitions = (0..topic_meta.partitions.len())
-                .map(|p_id| PartitionMetadata {
-                    id: p_id as u32,
-                    leader: 0, // todo: hardcoded leader
-                    replicas: vec![0],
-                    isr: vec![0],
-                })
-                .collect();
+//     let mut topics = Vec::new();
+//     for topic_name in requested_topics {
+//         if let Some(topic_meta) = topics_meta.get(&topic_name) {
+//             let partitions = (0..topic_meta.partitions.len())
+//                 .map(|p_id| PartitionMetadata {
+//                     id: p_id as u32,
+//                     leader: 0, // todo: hardcoded leader
+//                     replicas: vec![0],
+//                     isr: vec![0],
+//                 })
+//                 .collect();
 
-            topics.push(TopicMetadata {
-                name: topic_name.clone(),
-                partitions,
-            });
-        }
-    }
+//             topics.push(TopicMetadata {
+//                 name: topic_name.clone(),
+//                 partitions,
+//             });
+//         }
+//     }
 
-    Ok(Response::Metadata(MetadataResponse { topics, brokers }))
-}
+//     Ok(Response::Metadata(MetadataResponse { topics, brokers }))
+// }
 
 async fn handle_create_topic(req: CreateTopicRequest, broker: &Broker) -> Result<Response> {
     let response = broker.create_topic(req.name.clone(), req.partition_num).await;
@@ -249,3 +367,5 @@ async fn handle_sync_group(req: SyncGroupRequest, broker: &Broker) -> Result<Res
         error_code,
     }))
 }
+
+    */

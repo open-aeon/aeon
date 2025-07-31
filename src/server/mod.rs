@@ -1,8 +1,10 @@
 mod handler;
+mod codec;
 
 use crate::broker::Broker;
 use crate::config::ServerConfig;
-use crate::protocol::{Request, codec::ServerCodec};
+use crate::kafka::Request;
+use crate::server::codec::ServerCodec;
 use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use std::net::SocketAddr;
@@ -32,9 +34,11 @@ impl Server {
 
         loop {
             tokio::select! {
-                biased; // 优先处理关机信号
+                biased;
 
                 _ = signal::ctrl_c() => {
+                    println!("\n[Server] Ctrl-C received. Initiating graceful shutdown...");
+                    self.broker.initiate_shutdown().await;
                     break;
                 }
 

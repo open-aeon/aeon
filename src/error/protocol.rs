@@ -1,22 +1,31 @@
 use thiserror::Error;
+use std::io;
 
 #[derive(Error, Debug)]
 pub enum ProtocolError {
-    #[error("消息序列化错误: {0}")]
-    Serialization(String),
+    #[error("IoError: {0}")]
+    Io(#[from] io::Error),
 
-    #[error("无效的请求类型")]
-    InvalidRequestType,
+    #[error("Utf8Error: {0}")]
+    Utf8(#[from] std::str::Utf8Error),
+
+    #[error("Unknown API key: {0}")]
+    UnknownApiKey(i16),
     
-    #[error("无效的响应类型")]
-    InvalidResponseType,
-    
-    #[error("消息编码错误: {0}")]
-    Encoding(String),
-    
-    #[error("消息解码错误: {0}")]
-    Decoding(String),
-    
-    #[error("其他错误: {0}")]
-    Other(String),
-} 
+    #[error("API key mismatch")]
+    ApiKeyMismatch,
+
+    #[error("Unsupported compression type: {0}")]
+    UnsupportedCompressionType(u8),
+
+    #[error("Invalid CRC32")]
+    InvalidCrc,
+
+    #[error("Unsupported magic byte: {0}")]
+    UnsupportedMagicByte(i8),
+
+    #[error("Invalid tagged field")]
+    InvalidTaggedField,
+}
+
+pub type Result<T> = std::result::Result<T, ProtocolError>;

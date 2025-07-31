@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// 主题分区信息
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
@@ -18,15 +19,15 @@ pub struct TopicPartitionOffset {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TopicMetadata {
     pub name: String,
-    pub partitions: Vec<PartitionMetadata>,
+    pub partitions: HashMap<u32,PartitionMetadata>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PartitionMetadata {
-    pub id: u32,
     pub leader: u32,
     pub replicas: Vec<u32>,
     pub isr: Vec<u32>,
+    pub leader_epoch: i32,
 }
 
 

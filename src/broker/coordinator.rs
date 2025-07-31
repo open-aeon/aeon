@@ -6,8 +6,7 @@ use tokio::time::{sleep, Sleep};
 
 use crate::common::metadata::TopicPartition;
 use crate::error::consumer::ConsumerGroupError;
-use crate::protocol::response::{HeartbeatResult, JoinGroupResult, LeaveGroupResult, SyncGroupResult};
-use crate::broker::consumer_group::{ConsumerGroup, ConsumerMember, GroupState};
+use crate::broker::consumer_group::{ConsumerGroup, ConsumerMember, GroupState, JoinGroupResult, LeaveGroupResult, HeartbeatResult, SyncGroupResult};
 
 pub struct JoinGroupRequest {
     pub group_id: String,
@@ -189,14 +188,14 @@ impl GroupCoordinator {
     fn handle_leave_group(&mut self, request: LeaveGroupRequest, response_tx: oneshot::Sender<Result<LeaveGroupResult, ConsumerGroupError>>) {
         println!("[Coordinator] Member '{}' left group '{}'.", self.group.name, self.group.name);
         self.group.remove_member(&request.member_id);
-        let _ = response_tx.send(Ok(LeaveGroupResult { error_code: None }));
+        let _ = response_tx.send(Ok(LeaveGroupResult {}));
 
         self.trigger_rebalance_if_needed();
     }
 
     fn handle_heartbeat(&mut self, request: HeartbeatRequest, response_tx: oneshot::Sender<Result<HeartbeatResult, ConsumerGroupError>>) {
         if self.group.heartbeat(&request.member_id) {
-            let _ = response_tx.send(Ok(HeartbeatResult { error_code: None }));
+            let _ = response_tx.send(Ok(HeartbeatResult {}));
         } else {
             let _ = response_tx.send(Err(ConsumerGroupError::MemberNotFound(request.member_id)));
         }
