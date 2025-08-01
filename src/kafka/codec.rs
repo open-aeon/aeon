@@ -1,4 +1,4 @@
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 use std::collections::HashMap;
 
 use crate::error::protocol::{ProtocolError, Result};
@@ -13,10 +13,10 @@ pub trait Varint: Sized {
 }
 
 pub trait Encode: Sized {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()>;
-    fn encode_to_vec(&self) -> Result<Vec<u8>> {
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()>;
+    fn encode_to_vec(&self, api_version: i16) -> Result<Vec<u8>> {
         let mut buf = Vec::new();
-        self.encode(&mut buf)?;
+        self.encode(&mut buf, api_version)?;
         Ok(buf)
     }
 }
@@ -26,7 +26,7 @@ pub trait Decode: Sized {
 }
 
 impl Encode for i8 {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, _api_version: i16) -> Result<()> {
         buf.put_i8(*self);
         Ok(())
     }
@@ -39,7 +39,7 @@ impl Decode for i8 {
 }
 
 impl Encode for u8 {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, _api_version: i16) -> Result<()> {
         buf.put_u8(*self);
         Ok(())
     }
@@ -52,7 +52,7 @@ impl Decode for u8 {
 }
 
 impl Encode for i16 {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, _api_version: i16) -> Result<()> {
         buf.put_i16(*self);
         Ok(())
     }
@@ -65,7 +65,7 @@ impl Decode for i16 {
 }
 
 impl Encode for u16 {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, _api_version: i16) -> Result<()> {
         buf.put_u16(*self);
         Ok(())
     }
@@ -78,7 +78,7 @@ impl Decode for u16 {
 }
 
 impl Encode for i32 {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, _api_version: i16) -> Result<()> {
         buf.put_i32(*self);
         Ok(())
     }
@@ -91,7 +91,7 @@ impl Decode for i32 {
 }
 
 impl Encode for u32 {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, _api_version: i16) -> Result<()> {
         buf.put_u32(*self);
         Ok(())
     }
@@ -104,7 +104,7 @@ impl Decode for u32 {
 }
 
 impl Encode for i64 {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, _api_version: i16) -> Result<()> {
         buf.put_i64(*self);
         Ok(())
     }
@@ -117,7 +117,7 @@ impl Decode for i64 {
 }
 
 impl Encode for u64 {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, _api_version: i16) -> Result<()> {
         buf.put_u64(*self);
         Ok(())
     }
@@ -130,7 +130,7 @@ impl Decode for u64 {
 }
 
 impl Encode for f32 {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, _api_version: i16) -> Result<()> {
         buf.put_f32(*self);
         Ok(())
     }
@@ -143,7 +143,7 @@ impl Decode for f32 {
 }
 
 impl Encode for f64 {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, _api_version: i16) -> Result<()> {
         buf.put_f64(*self);
         Ok(())
     }
@@ -156,9 +156,9 @@ impl Decode for f64 {
 }
 
 impl Encode for String {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
         let len = self.len() as i16;
-        len.encode(buf)?;
+        len.encode(buf, api_version)?;
         buf.put_slice(self.as_bytes());
         Ok(())
     }
@@ -189,11 +189,11 @@ impl Decode for String {
 }
 
 impl<T: Encode> Encode for Vec<T> {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
         let len = self.len() as i32;
-        len.encode(buf)?;
+        len.encode(buf, api_version)?;
         for item in self {
-            item.encode(buf)?;
+            item.encode(buf, api_version)?;
         }
         Ok(())
     }
@@ -214,7 +214,7 @@ impl<T: Decode> Decode for Vec<T> {
 }
 
 impl Encode for () {
-    fn encode(&self, _: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, _: &mut impl BufMut, _api_version: i16) -> Result<()> {
         Ok(())
     }
 }
@@ -226,10 +226,10 @@ impl Decode for () {
 }
 
 impl<T: Encode> Encode for Option<T> {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
         match self {
-            Some(value) => value.encode(buf),
-            None => (-1i16).encode(buf),
+            Some(value) => value.encode(buf, api_version),
+            None => (-1i16).encode(buf, api_version),
         }
     }
 }
@@ -253,11 +253,11 @@ impl<T: Decode> Decode for Option<T> {
 
 
 impl<K: Encode, V: Encode> Encode for HashMap<K, V> {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        (self.len() as i32).encode(buf)?;
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        (self.len() as i32).encode(buf, api_version)?;
         for (key, value) in self {
-            key.encode(buf)?;
-            value.encode(buf)?;
+            key.encode(buf, api_version)?;
+            value.encode(buf, api_version)?;
         }
         Ok(())
     }
@@ -403,11 +403,11 @@ impl Varint for u16 {
 }
 
 impl<T: Encode> Encode for CompactVec<T> {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
         let len = (self.0.len() as u32) + 1;
         len.encode_varint(buf);
         for item in &self.0 {
-            item.encode(buf)?;
+            item.encode(buf, api_version)?;
         }
         Ok(())
     }
@@ -432,7 +432,7 @@ impl<T: Decode> Decode for CompactVec<T> {
 pub struct CompactString(pub String);
 
 impl Encode for CompactString {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, _api_version: i16) -> Result<()> {
         let len = (self.0.len() as u32) + 1;
         len.encode_varint(buf);
         buf.put_slice(self.0.as_bytes());
@@ -468,7 +468,7 @@ impl Decode for CompactString {
 pub struct CompactNullableString(pub Option<String>);
 
 impl Encode for CompactNullableString {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, _api_version: i16) -> Result<()> {
         match &self.0 {
             Some(s) => {
                 let len = (s.len() as u32) + 1;
@@ -505,7 +505,56 @@ impl Decode for CompactNullableString {
 }
 
 impl Encode for bool {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        (*self as i8).encode(buf)
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        (*self as i8).encode(buf, api_version)
+    }
+}
+
+impl Decode for bool {
+    fn decode(buf: &mut impl Buf, api_version: i16) -> Result<Self> {
+        let val = i8::decode(buf, api_version)?;
+        match val {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(ProtocolError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid value for bool, must be 0 or 1",
+            ))),
+        }
+    }
+}
+
+impl Encode for Bytes {
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        if self.len() > i16::MAX as usize {
+            return Err(ProtocolError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Bytes length is too large for i16",
+            )));
+        }
+        let len = self.len() as i16;
+        len.encode(buf, api_version)?;
+        buf.put_slice(self);
+        Ok(())
+    }
+}
+
+impl Decode for Bytes {
+    fn decode(buf: &mut impl Buf, api_version: i16) -> Result<Self> {
+        let len = i16::decode(buf, api_version)?;
+        if len < 0 {
+            return Err(ProtocolError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Bytes length cannot be negative",
+            )));
+        }
+        let len = len as usize;
+        if buf.remaining() < len {
+            return Err(ProtocolError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Not enough bytes for Bytes",
+            )));
+        }
+        Ok(buf.copy_to_bytes(len))
     }
 }

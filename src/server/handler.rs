@@ -104,7 +104,7 @@ async fn handle_produce(req: ProduceRequest, broker: &Broker) -> Result<Response
             };
             
             let messages : std::result::Result<Vec<Vec<u8>>, _> = p_data.records.records
-                .iter().map(|record| record.encode_to_vec()).collect();
+                .iter().map(|record| record.encode_to_vec(req.api_version)).collect();
             let message_to_store = match messages {
                 Ok(messages) => messages,
                 Err(e) => {

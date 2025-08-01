@@ -71,15 +71,15 @@ impl RequestHeader {
 }
 
 impl Encode for RequestHeader {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        self.api_key.encode(buf)?;
-        self.api_version.encode(buf)?;
-        self.correlation_id.encode(buf)?;
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        self.api_key.encode(buf, api_version)?;
+        self.api_version.encode(buf, api_version)?;
+        self.correlation_id.encode(buf, api_version)?;
         if is_flexible_version(self.api_key, self.api_version) {
-            CompactNullableString(self.client_id.clone()).encode(buf)?;
+            CompactNullableString(self.client_id.clone()).encode(buf, api_version)?;
             0u32.encode_varint(buf);
         } else {
-            self.client_id.encode(buf)?;
+            self.client_id.encode(buf, api_version)?;
         }
         Ok(())
     }
@@ -104,9 +104,9 @@ pub struct ApiVersionsRequest {
 }
 
 impl Encode for ApiVersionsRequest {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        self.client_software_name.encode(buf)?;
-        self.client_software_version.encode(buf)?;
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        self.client_software_name.encode(buf, api_version)?;
+        self.client_software_version.encode(buf, api_version)?;
         // Tagged Fields
         0u32.encode_varint(buf);
         Ok(())
@@ -139,8 +139,8 @@ pub struct MetadataRequest {
 }
 
 impl Encode for MetadataRequest {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        self.topics.encode(buf)
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        self.topics.encode(buf, api_version)
     }
 }
 
@@ -157,13 +157,14 @@ pub struct ProduceRequest {
     pub acks: i16,
     pub timeout_ms: i32,
     pub topics: HashMap<String, TopicProduceData>,
+    pub api_version: i16,
 }
 
 impl Encode for ProduceRequest {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        self.acks.encode(buf)?;
-        self.timeout_ms.encode(buf)?;
-        self.topics.encode(buf)
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        self.acks.encode(buf, api_version)?;
+        self.timeout_ms.encode(buf, api_version)?;
+        self.topics.encode(buf, api_version)
     }
 }
 
@@ -173,6 +174,7 @@ impl Decode for ProduceRequest {
             acks: i16::decode(buf, api_version)?,
             timeout_ms: i32::decode(buf, api_version)?,
             topics: HashMap::decode(buf, api_version)?,
+            api_version,
         })
     }
 }
@@ -183,8 +185,8 @@ pub struct TopicProduceData {
 }
 
 impl Encode for TopicProduceData {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        self.partitions.encode(buf)
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        self.partitions.encode(buf, api_version)
     }
 }
 
@@ -203,9 +205,9 @@ pub struct PartitionProduceData {
 }
 
 impl Encode for PartitionProduceData {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        self.index.encode(buf)?;
-        self.records.encode(buf)
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        self.index.encode(buf, api_version)?;
+        self.records.encode(buf, api_version)
     }
 }
 

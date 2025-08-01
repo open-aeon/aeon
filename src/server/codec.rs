@@ -74,7 +74,7 @@ impl Encoder<Response> for ServerCodec {
 
         // 2. Encode the response payload directly into the destination buffer.
         // `dst` is already a `&mut BytesMut`, which implements `BufMut`.
-        item.encode(dst)
+        item.encode(dst, item.api_version)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         // 3. Now, calculate the length of the payload we just wrote.

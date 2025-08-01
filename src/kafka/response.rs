@@ -21,7 +21,7 @@ impl ResponseHeader {
     }
     
     pub fn encode_with_version(&self, buf: &mut impl BufMut, api_key: i16, api_version: i16) -> Result<()> {
-        self.correlation_id.encode(buf)?;
+        self.correlation_id.encode(buf, api_version)?;
         
         // 只有flexible版本才包含tagged fields
         if Self::should_use_flexible_header(api_key, api_version) {
@@ -33,9 +33,9 @@ impl ResponseHeader {
 }
 
 impl Encode for ResponseHeader {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
         // 默认编码（向后兼容），不包含tagged fields
-        self.correlation_id.encode(buf)?;
+        self.correlation_id.encode(buf, api_version)?;
         Ok(())
     }
 }
@@ -56,9 +56,9 @@ pub struct Response {
 }
 
 impl Encode for Response {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
         // 使用正确的header版本进行编码
-        self.header.encode_with_version(buf, self.api_key, self.api_version)?;
+        self.header.encode_with_version(buf, self.api_key, api_version)?;
         
         match &self.response_type {
             ResponseType::ApiVersions(response) => {
@@ -66,8 +66,8 @@ impl Encode for Response {
                 response.encode_with_version(buf, self.api_version)?;
                 Ok(())
             },
-            ResponseType::Metadata(response) => response.encode(buf),
-            ResponseType::Produce(response) => response.encode(buf),
+            ResponseType::Metadata(response) => response.encode(buf, api_version),
+            ResponseType::Produce(response) => response.encode(buf, api_version),
         }
     }
 }
@@ -81,22 +81,22 @@ pub struct ApiVersionsResponse {
 
 impl ApiVersionsResponse {
     pub fn encode_with_version(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
-        self.error_code.encode(buf)?;
+        self.error_code.encode(buf, api_version)?;
         
         // 根据API版本选择数组编码格式
         if api_version >= 3 {
             // flexible版本：使用CompactVec编码
             let compact_api_keys = CompactVec(self.api_keys.clone());
-            compact_api_keys.encode(buf)?;
+            compact_api_keys.encode(buf, api_version)?;
         } else {
             // 非flexible版本：使用普通数组编码
-            (self.api_keys.len() as i32).encode(buf)?;
+            (self.api_keys.len() as i32).encode(buf, api_version)?;
             for api_key in &self.api_keys {
-                api_key.encode_with_version(buf, api_version)?;
+                api_key.encode(buf, api_version)?;
             }
         }
         
-        self.throttle_time_ms.encode(buf)?;
+        self.throttle_time_ms.encode(buf, api_version)?;
         
         // 只有flexible版本才有tagged_fields
         if api_version >= 3 {
@@ -108,9 +108,9 @@ impl ApiVersionsResponse {
 }
 
 impl Encode for ApiVersionsResponse {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
         // 默认使用flexible版本编码（为了向后兼容）
-        self.encode_with_version(buf, 3)
+        self.encode_with_version(buf, api_version)
     }
 }
 
@@ -123,9 +123,9 @@ pub struct ApiKey {
 
 impl ApiKey {
     pub fn encode_with_version(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
-        self.key.encode(buf)?;
-        self.min_version.encode(buf)?;
-        self.max_version.encode(buf)?;
+        self.key.encode(buf, api_version)?;
+        self.min_version.encode(buf, api_version)?;
+        self.max_version.encode(buf, api_version)?;
         
         // 只有flexible版本才有tagged_fields
         if api_version >= 3 {
@@ -137,7 +137,7 @@ impl ApiKey {
 }
 
 impl Encode for ApiKey {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
         // 默认使用flexible版本编码（为了向后兼容）
         self.encode_with_version(buf, 3)
     }
@@ -153,12 +153,12 @@ pub struct MetadataResponse {
 }
 
 impl Encode for MetadataResponse {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        self.throttle_time_ms.encode(buf)?;
-        self.brokers.encode(buf)?;
-        self.cluster_id.encode(buf)?;
-        self.controller_id.encode(buf)?;
-        self.topics.encode(buf)?;
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        self.throttle_time_ms.encode(buf, api_version)?;
+        self.brokers.encode(buf, api_version)?;
+        self.cluster_id.encode(buf, api_version)?;
+        self.controller_id.encode(buf, api_version)?;
+        self.topics.encode(buf, api_version)?;
         // This response version (e.g. v5) might have tagged fields
         0u32.encode_varint(buf); 
         Ok(())
@@ -174,11 +174,11 @@ pub struct Broker {
 }
 
 impl Encode for Broker {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        self.node_id.encode(buf)?;
-        self.host.encode(buf)?;
-        self.port.encode(buf)?;
-        self.rack.encode(buf)?;
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        self.node_id.encode(buf, api_version)?;
+        self.host.encode(buf, api_version)?;
+        self.port.encode(buf, api_version)?;
+        self.rack.encode(buf, api_version)?;
         Ok(())
     }
 }
@@ -192,11 +192,11 @@ pub struct Topic {
 }
 
 impl Encode for Topic {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        self.error_code.encode(buf)?;
-        self.name.encode(buf)?;
-        self.is_internal.encode(buf)?;
-        self.partitions.encode(buf)?;
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        self.error_code.encode(buf, api_version)?;
+        self.name.encode(buf, api_version)?;
+        self.is_internal.encode(buf, api_version)?;
+        self.partitions.encode(buf, api_version)?;
         // Tagged fields
         0u32.encode_varint(buf);
         Ok(())
@@ -215,14 +215,14 @@ pub struct Partition {
 }
 
 impl Encode for Partition {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        self.error_code.encode(buf)?;
-        self.partition_index.encode(buf)?;
-        self.leader_id.encode(buf)?;
-        self.leader_epoch.encode(buf)?;
-        self.replica_nodes.encode(buf)?;
-        self.isr_nodes.encode(buf)?;
-        self.offline_replicas.encode(buf)?;
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        self.error_code.encode(buf, api_version)?;
+        self.partition_index.encode(buf, api_version)?;
+        self.leader_id.encode(buf, api_version)?;
+        self.leader_epoch.encode(buf, api_version)?;
+        self.replica_nodes.encode(buf, api_version)?;
+        self.isr_nodes.encode(buf, api_version)?;
+        self.offline_replicas.encode(buf, api_version)?;
         // Tagged fields for flexible versions would go here
         0u32.encode_varint(buf);
         Ok(())
@@ -236,9 +236,9 @@ pub struct ProduceResponse {
 }
 
 impl Encode for ProduceResponse {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        self.topic_data.encode(buf)?;
-        self.throttle_time_ms.encode(buf)?;
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        self.topic_data.encode(buf, api_version)?;
+        self.throttle_time_ms.encode(buf, api_version)?;
         Ok(())
     }
 }
@@ -249,8 +249,8 @@ pub struct TopicProduceResponse {
 }
 
 impl Encode for TopicProduceResponse {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        self.partitions.encode(buf)
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        self.partitions.encode(buf, api_version)
     }
 }
 
@@ -264,12 +264,12 @@ pub struct PartitionProduceResponse {
 }
 
 impl Encode for PartitionProduceResponse {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        self.partition_index.encode(buf)?;
-        self.error_code.encode(buf)?;
-        self.base_offset.encode(buf)?;
-        self.log_append_time_ms.encode(buf)?;
-        self.log_start_offset.encode(buf)?;
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        self.partition_index.encode(buf, api_version)?;
+        self.error_code.encode(buf, api_version)?;
+        self.base_offset.encode(buf, api_version)?;
+        self.log_append_time_ms.encode(buf, api_version)?;
+        self.log_start_offset.encode(buf, api_version)?;
         // Tagged fields
         0u32.encode_varint(buf);
         Ok(())
