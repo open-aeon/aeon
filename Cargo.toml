@@ -42,7 +42,6 @@ varuint = "0.7.1"
 bifrost-protocol-macro = { path = "bifrost-protocol-macro" }
 
 [dev-dependencies]
-bifrost-client = {path = "bifrost-client"}
 tempfile = "3.10.1"
 
 [build-dependencies]

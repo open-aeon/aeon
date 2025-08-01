@@ -1,4 +1,4 @@
-use crate::kafka::codec::{Decode, Encode};
+use crate::kafka::codec::{Decode, Encode, Varint};
 
 // This file is a placeholder and will be populated by `build.rs`.
 // It includes the code generated from the Kafka protocol JSON definitions.
