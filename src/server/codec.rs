@@ -4,10 +4,10 @@ use tokio_util::codec::{Decoder, Encoder};
 
 use crate::error::protocol::ProtocolError;
 use crate::kafka::codec::{Decode, Encode};
-use crate::kafka::request::{
-    ApiVersionsRequest, MetadataRequest, ProduceRequest, Request, RequestHeader, RequestType,
+use crate::kafka::{
+    protocol::{ApiVersionsRequest, MetadataRequest, ProduceRequest},
+    Request, RequestHeader, RequestType, Response,
 };
-use crate::kafka::response::Response;
 
 
 #[derive(Default)]
@@ -39,8 +39,8 @@ impl Decoder for ServerCodec {
             std::io::Error::new(std::io::ErrorKind::InvalidData, e)
         };
 
-        println!("Decoding request, length: {}", len);
-        println!("Body data: {:02x?}", &body_buf[4..]);
+        // println!("Decoding request, length: {}", len);
+        // println!("Body data: {:02x?}", &body_buf[4..]);
 
         let header = RequestHeader::decode_header(&mut cursor).map_err(err_convert)?;
         let api_version = header.api_version;
@@ -55,7 +55,7 @@ impl Decoder for ServerCodec {
             _ => return Err(err_convert(ProtocolError::UnknownApiKey(header.api_key))),
         }.map_err(err_convert)?;
 
-        println!("Successfully decoded request type: {:?}", request_type);
+        // println!("Successfully decoded request type: {:?}", request_type);
 
         Ok(Some(Request { header, request_type }))
     }
@@ -74,7 +74,7 @@ impl Encoder<Response> for ServerCodec {
 
         // 2. Encode the response payload directly into the destination buffer.
         // `dst` is already a `&mut BytesMut`, which implements `BufMut`.
-        item.encode(dst)
+        item.encode(dst, item.api_version)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         // 3. Now, calculate the length of the payload we just wrote.

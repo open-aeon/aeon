@@ -35,9 +35,9 @@ pub struct Record {
 }
 
 impl Encode for Record {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
         let mut temp_record_buf = Vec::new();
-        self.attributes.encode(&mut temp_record_buf)?;
+        self.attributes.encode(&mut temp_record_buf, api_version)?;
         encode_varint_i64(self.timestamp_delta, &mut temp_record_buf);
         encode_varint_i64(self.offset_delta, &mut temp_record_buf);
 
@@ -110,27 +110,27 @@ pub struct RecordBatch {
 }
 
 impl Encode for RecordBatch {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
         let mut temp_buf = Vec::new();
 
         // Encode everything after batch_length
-        self.leader_epoch.encode(&mut temp_buf)?;
-        self.magic.encode(&mut temp_buf)?;
+        self.leader_epoch.encode(&mut temp_buf, api_version)?;
+        self.magic.encode(&mut temp_buf, api_version)?;
 
         let crc_placeholder_pos = temp_buf.len();
-        0u32.encode(&mut temp_buf)?;
+        0u32.encode(&mut temp_buf, api_version)?;
 
-        self.attributes.encode(&mut temp_buf)?;
-        self.last_offset_delta.encode(&mut temp_buf)?;
-        self.first_timestamp.encode(&mut temp_buf)?;
-        self.max_timestamp.encode(&mut temp_buf)?;
-        self.producer_id.encode(&mut temp_buf)?;
-        self.producer_epoch.encode(&mut temp_buf)?;
-        self.base_sequence.encode(&mut temp_buf)?;
-        (self.records.len() as i32).encode(&mut temp_buf)?;
+        self.attributes.encode(&mut temp_buf, api_version)?;
+        self.last_offset_delta.encode(&mut temp_buf, api_version)?;
+        self.first_timestamp.encode(&mut temp_buf, api_version)?;
+        self.max_timestamp.encode(&mut temp_buf, api_version)?;
+        self.producer_id.encode(&mut temp_buf, api_version)?;
+        self.producer_epoch.encode(&mut temp_buf, api_version)?;
+        self.base_sequence.encode(&mut temp_buf, api_version)?;
+        (self.records.len() as i32).encode(&mut temp_buf, api_version)?;
 
         for record in &self.records {
-            record.encode(&mut temp_buf)?;
+            record.encode(&mut temp_buf, api_version)?;
         }
         
         let batch_length = temp_buf.len() as i32;
@@ -139,10 +139,10 @@ impl Encode for RecordBatch {
         let crc = crc32fast::hash(&temp_buf[crc_data_start..]);
 
         // Now write everything to the main buffer
-        self.base_offset.encode(buf)?;
-        batch_length.encode(buf)?;
+        self.base_offset.encode(buf, api_version)?;
+        batch_length.encode(buf, api_version)?;
         buf.put_slice(&temp_buf[..crc_placeholder_pos]);
-        crc.encode(buf)?;
+        crc.encode(buf, api_version)?;
         buf.put_slice(&temp_buf[crc_data_start..]);
 
         Ok(())
