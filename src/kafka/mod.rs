@@ -5,7 +5,7 @@ pub mod protocol;
 use bytes::{Buf, BufMut};
 use crate::error::protocol::{ProtocolError, Result};
 use crate::kafka::codec::{Decode, Encode, Varint, CompactNullableString};
-use crate::kafka::protocol::{ApiVersionsRequest, MetadataRequest, ProduceRequest, ApiVersionsResponse, MetadataResponse, ProduceResponse};
+use crate::kafka::protocol::*;
 
 // --- Request ---
 
@@ -90,6 +90,7 @@ impl Encode for RequestHeader {
 #[derive(Debug)]
 pub enum RequestType {
     Produce(ProduceRequest),
+    Fetch(FetchRequest),
     Metadata(MetadataRequest),
     ApiVersions(ApiVersionsRequest),
 }
@@ -131,9 +132,10 @@ impl ResponseHeader {
 
 #[derive(Debug)]
 pub enum ResponseType {
+    Produce(ProduceResponse),
+    Fetch(FetchResponse),
     ApiVersions(ApiVersionsResponse),
     Metadata(MetadataResponse),
-    Produce(ProduceResponse),
 }
 
 #[derive(Debug)]
@@ -149,9 +151,10 @@ impl Encode for Response {
         self.header.encode_with_version(buf, self.api_key, api_version)?;
         
         match &self.response_type {
+            ResponseType::Produce(response) => response.encode(buf, api_version),
+            ResponseType::Fetch(response) => response.encode(buf, api_version),
             ResponseType::ApiVersions(response) => response.encode(buf, self.api_version),
             ResponseType::Metadata(response) => response.encode(buf, api_version),
-            ResponseType::Produce(response) => response.encode(buf, api_version),
         }
     }
 }

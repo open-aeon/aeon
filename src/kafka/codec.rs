@@ -1,5 +1,4 @@
 use bytes::{Buf, BufMut, Bytes};
-use std::collections::HashMap;
 use crate::error::protocol::{ProtocolError, Result};
 
 // --- Core Traits ---

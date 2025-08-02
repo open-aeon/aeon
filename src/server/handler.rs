@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::collections::HashMap;
 
 use crate::broker::Broker;
 use crate::common::metadata::TopicPartition;
@@ -13,9 +12,10 @@ pub async fn handle_request(request: Request, broker: &Broker) -> Result<Respons
     let api_version = request.header.api_version;
 
     let response_type = match request.request_type {
+        RequestType::Produce(req) => handle_produce(&req, broker).await?,
+        RequestType::Fetch(req) => handle_fetch(&req, broker).await?,
         RequestType::ApiVersions(req) => handle_api_versions(&req, broker).await?,
         RequestType::Metadata(req) => handle_metadata(&req, broker).await?,
-        RequestType::Produce(req) => handle_produce(&req, broker).await?,
     };
 
     Ok(Response {
@@ -157,4 +157,12 @@ async fn handle_produce(req: &ProduceRequest, broker: &Broker) -> Result<Respons
         throttle_time_ms: 0,
         ..Default::default()
     }))
+}
+
+async fn handle_fetch(req: &FetchRequest, broker: &Broker) -> Result<ResponseType> {
+    let response = FetchResponse {
+        responses: vec![],
+        ..Default::default()
+    };
+    Ok(ResponseType::Fetch(response))
 }

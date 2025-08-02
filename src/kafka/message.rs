@@ -1,6 +1,5 @@
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use flate2::read::GzDecoder;
-use std::io::{Cursor, Read, Write};
+use bytes::{Buf, BufMut, Bytes};
+use std::io::Cursor;
 use varuint::{ReadVarint, WriteVarint};
 
 use crate::error::protocol::{ProtocolError, Result};
@@ -154,7 +153,7 @@ impl Decode for RecordBatch {
         let base_offset = i64::decode(buf, api_version)?;
         let batch_length = i32::decode(buf, api_version)?;
 
-        let mut batch_buf = buf.copy_to_bytes(batch_length as usize);
+        let batch_buf = buf.copy_to_bytes(batch_length as usize);
         let mut batch_cursor = Cursor::new(&batch_buf);
 
         let leader_epoch = i32::decode(&mut batch_cursor, api_version)?;
