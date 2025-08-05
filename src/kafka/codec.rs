@@ -1,4 +1,4 @@
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crate::error::protocol::{ProtocolError, Result};
 
 // --- Core Traits ---
@@ -13,10 +13,10 @@ pub trait Varint: Sized {
 
 pub trait Encode: Sized {
     fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()>;
-    fn encode_to_vec(&self, api_version: i16) -> Result<Vec<u8>> {
-        let mut buf = Vec::new();
+    fn encode_to_bytes(&self, api_version: i16) -> Result<Bytes> {
+        let mut buf = BytesMut::new();
         self.encode(&mut buf, api_version)?;
-        Ok(buf)
+        Ok(buf.freeze())
     }
 }
 

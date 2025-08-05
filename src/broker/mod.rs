@@ -9,6 +9,8 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, Mutex, mpsc, oneshot};
+use bytes::Bytes;
+use chrono::Utc;
 
 use crate::broker::coordinator::*;
 use crate::broker::consumer_group::*;
@@ -18,6 +20,12 @@ use crate::config::broker::BrokerConfig;
 use crate::config::storage::StorageConfig;
 use crate::broker::consumer_group::ConsumerGroup;
 use crate::common::metadata::OffsetCommitMetadata;
+use crate::kafka::codec::Decode;
+use crate::kafka::message::Record;
+use crate::kafka::message::RecordBatch;
+use crate::kafka::offsets::{OffsetKey, OffsetValue};
+use crate::kafka::codec::Encode;
+use crate::utils::hash::calculate_hash;
 
 pub struct Broker {
     pub config: Arc<BrokerConfig>,
@@ -232,37 +240,31 @@ impl Broker {
         }
     }
 
-    pub async fn append(&self, tp: &TopicPartition, data: &[u8]) -> Result<u64> {
+    pub async fn append_batch(&self, tp: &TopicPartition, data: Bytes, record_count: u32) -> Result<u64> {
         let topic_name = tp.topic.clone();
         let p_id = tp.partition;
 
+        let batch = RecordBatch::parse_header(&data)?;
+        batch.verify_crc(&data)?;
+        if batch.records_count as u32 != record_count {
+            return Err(anyhow::anyhow!("Record count mismatch"));
+        }
+
         let topics = self.topics.read().await;
         if let Some(topic) = topics.get(&topic_name) {
-            topic.append(p_id, data).await
+            topic.append_batch(p_id, data, record_count).await
         } else {
             Err(anyhow::anyhow!("Topic not found: {}", topic_name))
         }
     }
 
-    pub async fn append_batch(&self, tp: &TopicPartition, data: &[Vec<u8>]) -> Result<u64> {
+    pub async fn read_batch(&self, tp: &TopicPartition, start_offset: u64, max_bytes: usize) -> Result<Vec<Bytes>> {
         let topic_name = tp.topic.clone();
         let p_id = tp.partition;
 
         let topics = self.topics.read().await;
         if let Some(topic) = topics.get(&topic_name) {
-            topic.append_batch(p_id, data).await
-        } else {
-            Err(anyhow::anyhow!("Topic not found: {}", topic_name))
-        }
-    }
-
-    pub async fn read(&self, tp: &TopicPartition, offset: u64) -> Result<Vec<u8>> {
-        let topic_name = tp.topic.clone();
-        let p_id = tp.partition;
-
-        let topics = self.topics.read().await;
-        if let Some(topic) = topics.get(&topic_name) {
-            topic.read(p_id, offset).await
+            topic.read_batch(p_id, start_offset, max_bytes).await
         } else {
             Err(anyhow::anyhow!("Topic not found: {}", topic_name))
         }
@@ -447,15 +449,58 @@ impl Broker {
     }
 
     async fn persist_offset(&self, metadata: &OffsetCommitMetadata) -> Result<()> {
-        let data = bincode::serialize(metadata)?;
+        let key = OffsetKey {
+            version: 1,
+            group: metadata.group_id.clone(),
+            topic: metadata.topic.clone(),
+            partition: metadata.partition as i32,
+        };
+        let value = OffsetValue {
+            version: 3,
+            offset: metadata.offset,
+            leader_epoch: 0,
+            metadata: "".to_string(),
+            commit_timestamp: metadata.timestamp as i64,
+        };
+        let key_bytes = key.encode_to_bytes(0)?;
+        let value_bytes = value.encode_to_bytes(0)?;
+        let record = Record {
+            key: key_bytes,
+            value: value_bytes,
+            length: 0,
+            attributes: 0,
+            timestamp_delta: 0,
+            offset_delta: 0,
+        };
+        let now = Utc::now().timestamp_millis();
+        let record_batch = RecordBatch {
+            base_offset: -1, // Broker 写入时会设置
+            batch_length: 0, // encode 时会重新计算
+            leader_epoch: 0, // 假设
+            magic: 2, // Kafka 现代版本 magic byte
+            crc: 0, // encode 时会计算
+            attributes: 0, // 不使用压缩
+            last_offset_delta: 0,
+            first_timestamp: now,
+            max_timestamp: now,
+            producer_id: -1, // -1 表示不是来自事务性或幂等生产者
+            producer_epoch: -1,
+            base_sequence: -1,
+            records_count: 1,
+            records: vec![record],
+        };
 
-        let partition = 0;
+        let record_batch_bytes = record_batch.encode_to_bytes(0)?;
+
+        // todo: use config to determine partition number
+        let p_num = 50;
+        let partition = (calculate_hash(&metadata.group_id) % p_num) as u32;
         let tp = TopicPartition {
             topic: self.config.internal_topic_name.clone(),
             partition,
         };
 
-        self.append(&tp, &data).await?;
+        self.append_batch(&tp, record_batch_bytes, 1).await?;
 
         Ok(())
     }
@@ -471,21 +516,8 @@ impl Broker {
 
             let mut current_offset = 0;
             loop {
-                match self.read(&tp, current_offset).await {
-                    Ok(data) => {
-                        if let Ok(message) = bincode::deserialize::<OffsetCommitMetadata>(&data) {
-                            let group = groups
-                                .entry(message.group_id.clone())
-                                .or_insert_with(|| ConsumerGroup::new(message.group_id.clone()));
-
-                            let offset_tp = TopicPartition {
-                                topic: message.topic,
-                                partition: message.partition,
-                            };
-                            group.commit_offset(offset_tp, message.offset);
-                        }
-                        current_offset += 1;
-                    }
+                let batches_data = match self.read_batch(&tp, current_offset, 1024 * 1024).await {
+                    Ok(data) => data,
                     Err(e) => {
                         if let Some(err) = e.downcast_ref::<crate::error::StorageError>() {
                             if matches!(err, crate::error::StorageError::InvalidOffset) {
@@ -494,7 +526,32 @@ impl Broker {
                         }
                         return Err(e.into());
                     }
+                };
+
+                if batches_data.is_empty() {
+                    break;
                 }
+
+                let mut next_offset = current_offset;
+                for mut batch_bytes in batches_data.into_iter().map(bytes::Bytes::from) {
+                    let record_batch = RecordBatch::decode(&mut batch_bytes, 0)?;
+
+                    for record in &record_batch.records {
+                        let key = OffsetKey::decode(&mut record.key.clone(), 0)
+                                .with_context(||format!("Found corrupt key in internal topic partition: {}", tp.partition))?;
+                        let value = OffsetValue::decode(&mut record.value.clone(), 0)
+                                .with_context(||format!("Found corrupt value in internal topic partition: {}", tp.partition))?;
+
+                        let group = groups.entry(key.group.clone()).or_insert_with(|| ConsumerGroup::new(key.group.clone()));
+                        let offset_tp = TopicPartition {
+                            topic: key.topic,
+                            partition: key.partition as u32,
+                        };
+                        group.commit_offset(offset_tp, value.offset);
+                    }
+                    next_offset =(record_batch.base_offset + record_batch.last_offset_delta as i64 + 1) as u64;
+                }
+                current_offset = next_offset;
             }
         }
 

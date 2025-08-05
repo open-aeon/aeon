@@ -44,7 +44,7 @@ pub trait LogStorage: Send + Sync {
     ///
     /// # Returns
     /// A `Vec<Bytes>` where each `Bytes` element is a complete, raw `RecordBatch`.
-    async fn read_batches(&self, start_offset: u64, max_bytes: usize) -> Result<Vec<Bytes>>;
+    async fn read_batch(&self, start_offset: u64, max_bytes: usize) -> Result<Vec<Bytes>>;
 
     /// Truncates the log file to the specified physical byte position.
     ///

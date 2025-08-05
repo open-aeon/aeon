@@ -10,6 +10,7 @@ use crate::config::storage::StorageConfig;
 use crate::error::StorageError;
 use crate::storage::LogStorage;
 mod segment;
+use bytes::Bytes;
 
 pub struct MmapLogStorage {
     log: Arc<Mutex<MmapLog>>,
@@ -24,36 +25,29 @@ impl MmapLogStorage {
 
 #[async_trait]
 impl LogStorage for MmapLogStorage {
-    async fn append(&mut self, data: &[u8]) -> Result<u64> {
+
+    async fn append_batch(&mut self, data: Bytes, record_count: u32) -> Result<u64> {
         let log_clone = self.log.clone();
-        let data_owned = data.to_vec();
         let offset = tokio::task::spawn_blocking(move || {
-            log_clone.lock().expect("Failed to lock log").append(&data_owned)
+            log_clone.lock().expect("Fail to lock log").append_batch(&data, record_count)
         }).await??;
 
         Ok(offset)
     }
 
-    async fn append_batch(&mut self, data: &[Vec<u8>]) -> Result<u64> {
+    async fn read_batch(&self, start_offset: u64, max_bytes: usize) -> Result<Vec<Bytes>> {
         let log_clone = self.log.clone();
-        let data_owned = data.to_vec();
-        let offset = tokio::task::spawn_blocking(move || {
-            log_clone.lock().expect("Fail to lock log").append_batch(&data_owned)
+        let batches = tokio::task::spawn_blocking(move || {
+            log_clone.lock().expect("Fail to lock log").read_batch(start_offset, max_bytes)
         }).await??;
-
-        Ok(offset)
+        Ok(batches)
     }
 
-    async fn read(&self, logical_offset: u64) -> Result<Vec<u8>> {
+    async fn truncate(&mut self, offset: u64) -> Result<()> {
         let log_clone = self.log.clone();
-
         tokio::task::spawn_blocking(move || {
-            log_clone
-                .lock()
-                .expect("Mutex was poisoned")
-                .read(logical_offset)
-        })
-        .await?
+            log_clone.lock().expect("Fail to lock log").truncate(offset)
+        }).await?
     }
     
     async fn flush(&mut self) -> Result<()> {
@@ -112,7 +106,7 @@ impl MmapLog {
             if file.is_file() && file.extension().map_or(false, |s| s == "log") {
                 if let Some(stem) = file.file_stem().and_then(|s| s.to_str()) {
                     if let Ok(base_offset) = stem.parse::<u64>() {
-                        let segment = LogSegment::open(&path, base_offset, config.index_interval_bytes)?;
+                        let segment = LogSegment::open(&path, base_offset, config.index_interval_bytes, config.preallocate)?;
                         segments.insert(base_offset, segment);
                     }
                 }
@@ -121,7 +115,7 @@ impl MmapLog {
        
        if segments.is_empty() {
             let base_offset = 0;
-            let first_segment = LogSegment::create(&path, base_offset, config.index_interval_bytes)?;
+            let first_segment = LogSegment::create(&path, base_offset, config.index_interval_bytes, config.preallocate)?;
             segments.insert(base_offset, first_segment);
        }
 
@@ -135,40 +129,16 @@ impl MmapLog {
        })
     }
 
-    pub fn append(&mut self, record: &[u8]) -> Result<u64> {
-
-        let needs_roll = {
-            let active_segment = self.segments.get_mut(&self.active_segment_offset).unwrap();
-            active_segment.size() + record.len() > self.config.segment_size as usize
-        };
-
-        if needs_roll {
-            let old_base_offset = self.active_segment_offset;
-            let old_segment = self.segments.get(&old_base_offset).unwrap();
-            let new_base_offset = old_base_offset + old_segment.record_count();
-
-            println!("Log segment {} is full. Creating new segment with base offset {}", old_base_offset, new_base_offset);
-
-            let new_segment = LogSegment::create(&self.path, new_base_offset, self.config.index_interval_bytes)?;
-            self.segments.insert(new_base_offset, new_segment);
-            self.active_segment_offset = new_base_offset;
-        }
-
-        let segment = self.segments.get_mut(&self.active_segment_offset).unwrap();
-        let logical_offset = segment.append(&record)?;
-
-        Ok(logical_offset)
-    }
-
-    pub fn append_batch(&mut self, records: &[Vec<u8>]) -> Result<u64> {
+    pub fn append_batch(&mut self, records: &Bytes, record_count: u32) -> Result<u64> {
         if records.is_empty() {
             let active_segment = self.segments.get(&self.active_segment_offset).unwrap();
             return Ok(active_segment.base_offset() + active_segment.record_count());
         }
 
-        let batch_size: usize = records.iter().map(|r| 12 + r.len()).sum();
+        let batch_size: usize = records.len();
         let mut active_segment = self.segments.get_mut(&self.active_segment_offset).unwrap();
 
+        // todo: add chunk and roll logic 
         if active_segment.size() + batch_size > self.config.segment_size as usize {
             if batch_size > self.config.segment_size as usize {
                 return Err(anyhow!(
@@ -190,6 +160,7 @@ impl MmapLog {
                 &self.path,
                 new_base_offset,
                 self.config.index_interval_bytes,
+                self.config.preallocate,
             )?;
             self.segments.insert(new_base_offset, new_segment);
             self.active_segment_offset = new_base_offset;
@@ -197,30 +168,57 @@ impl MmapLog {
             active_segment = self.segments.get_mut(&self.active_segment_offset).unwrap();
         }
 
-        active_segment.append_batch(records).map_err(|e| e.into())
+        active_segment.append_batch(records, record_count).map_err(|e| e.into())
     }
 
-    pub fn read(&self, logical_offset: u64) -> Result<Vec<u8>> {
-        // Find the segment that contains the logical_offset.
-        // The BTreeMap is sorted by base_offset, so we can use range to find the
-        // segment with the greatest base_offset that is less than or equal to the
-        // logical_offset.
-        let segment = match self.segments.range(..=logical_offset).next_back() {
+    pub fn read_batch(&self, start_offset: u64, max_bytes: usize) -> Result<Vec<Bytes>> {
+        let segment = match self.segments.range(..=start_offset).next_back() {
             Some((_, segment)) => segment,
             None => {
                 return Err(StorageError::InvalidOffset.into());
             }
         };
 
-        // Calculate the relative offset within the segment.
-        let relative_offset = (logical_offset - segment.base_offset()) as u32;
+        segment.read_batch(start_offset, max_bytes).map_err(|e| e.into())
+    }
 
-        // Delegate the read operation to the found segment.
-        match segment.read(relative_offset) {
-            Ok(Some(record)) => Ok(record),
-            Ok(None) => Err(StorageError::InvalidOffset.into()),
-            Err(e) => Err(e.into()),
+    pub fn truncate(&mut self, offset: u64) -> Result<()> {
+        // 找到第一个base_offset >= offset 的 segment
+        let mut found = false;
+        let mut to_delete: Vec<u64> = Vec::new();
+        let mut to_truncate: Option<u64> = None;
+
+        for (&base_offset, _) in self.segments.range(offset..) {
+            // 第一个 >= offset 的 segment
+            to_truncate = Some(base_offset);
+            found = true;
+            break;
         }
+
+        // 收集所有 base_offset > offset 的 segment
+        for (&base_offset, _) in self.segments.range((offset + 1)..) {
+            to_delete.push(base_offset);
+        }
+
+        if !found {
+            return Err(StorageError::InvalidOffset.into());
+        }
+
+        // truncate 第一个 >= offset 的 segment
+        if let Some(base_offset) = to_truncate {
+            if let Some(segment) = self.segments.get_mut(&base_offset) {
+                segment.truncate(offset)?;
+            }
+        }
+
+        // 删除所有 base_offset > offset 的 segment
+        for base_offset in to_delete {
+            if let Some(segment) = self.segments.remove(&base_offset) {
+                segment.delete()?;
+            }
+        }
+
+        Ok(())
     }
 
     pub fn flush(&mut self) -> Result<()> {

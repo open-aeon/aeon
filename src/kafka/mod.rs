@@ -1,6 +1,7 @@
 pub mod codec;
 pub mod message;
 pub mod protocol;
+pub mod offsets;
 
 use bytes::{Buf, BufMut};
 use crate::error::protocol::{ProtocolError, Result};

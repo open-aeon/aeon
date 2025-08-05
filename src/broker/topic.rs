@@ -6,6 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use std::{collections::HashMap, path::PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock; 
+use bytes::Bytes;
 
 pub struct Topic {
     pub name: String,
@@ -64,28 +65,19 @@ impl Topic {
         Ok(Self { name, partitions })
     }
 
-    pub async fn append(&self, p_id: u32, data: &[u8]) -> Result<u64> {
+    pub async fn append_batch(&self, p_id: u32, data: Bytes, record_count: u32) -> Result<u64> {
         let partition = self.partitions.read().await;
         if let Some(partition) = partition.get(&p_id) {
-            partition.append(data).await
+            partition.append_batch(data, record_count).await
         } else {
             Err(anyhow::anyhow!("Partition not found: {}", p_id))
         }
     }
 
-    pub async fn append_batch(&self, p_id: u32, data: &[Vec<u8>]) -> Result<u64> {
+    pub async fn read_batch(&self, p_id: u32, start_offset: u64, max_bytes: usize) -> Result<Vec<Bytes>> {
         let partition = self.partitions.read().await;
         if let Some(partition) = partition.get(&p_id) {
-            partition.append_batch(data).await
-        } else {
-            Err(anyhow::anyhow!("Partition not found: {}", p_id))
-        }
-    }
-
-    pub async fn read(&self, p_id: u32, offset: u64) -> Result<Vec<u8>> {
-        let partition = self.partitions.read().await;
-        if let Some(partition) = partition.get(&p_id) {
-            partition.read(offset).await
+            partition.read_batch(start_offset, max_bytes).await
         } else {
             Err(anyhow::anyhow!("Partition not found: {}", p_id))
         }
