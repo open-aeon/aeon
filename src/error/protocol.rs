@@ -26,6 +26,15 @@ pub enum ProtocolError {
 
     #[error("Invalid tagged field")]
     InvalidTaggedField,
+
+    #[error("Invalid record batch format")]
+    InvalidRecordBatchFormat,
+
+    #[error("Invalid record batch field: {0}")]
+    InvalidRecordBatchField(&'static str),
+
+    #[error("Invalid record batch CRC")]
+    InvalidRecordBatchCrc,
 }
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;

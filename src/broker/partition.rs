@@ -6,6 +6,7 @@ use crate::{
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use tokio::sync::Mutex;
+use bytes::Bytes;
 
 pub struct Partition {
     log: Mutex<Box<dyn LogStorage>>,
@@ -37,19 +38,14 @@ impl Partition {
         Ok(Self { log: Mutex::new(log), tp })
     }
 
-    pub async fn append(&self, data: &[u8]) -> Result<u64> {
+    pub async fn append_batch(&self, data: Bytes, record_count: u32) -> Result<u64> {
         let mut log = self.log.lock().await;
-        log.append(data).await
+        log.append_batch(data, record_count).await
     }
 
-    pub async fn append_batch(&self, data: &[Vec<u8>]) -> Result<u64> {
-        let mut log = self.log.lock().await;
-        log.append_batch(data).await
-    }
-
-    pub async fn read(&self, offset: u64) -> Result<Vec<u8>> {
+    pub async fn read_batch(&self, start_offset: u64, max_bytes: usize) -> Result<Vec<Bytes>> {
         let log = self.log.lock().await;
-        log.read(offset).await
+        log.read_batch(start_offset, max_bytes).await
     }
 
     pub async fn flush(&self) -> Result<()> {

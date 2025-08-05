@@ -105,6 +105,7 @@ pub struct RecordBatch {
     pub producer_id: i64,
     pub producer_epoch: i16,
     pub base_sequence: i32,
+    pub records_count: i32,
     pub records: Vec<Record>,
 }
 
@@ -126,7 +127,7 @@ impl Encode for RecordBatch {
         self.producer_id.encode(&mut temp_buf, api_version)?;
         self.producer_epoch.encode(&mut temp_buf, api_version)?;
         self.base_sequence.encode(&mut temp_buf, api_version)?;
-        (self.records.len() as i32).encode(&mut temp_buf, api_version)?;
+        self.records_count.encode(&mut temp_buf, api_version)?;
 
         for record in &self.records {
             record.encode(&mut temp_buf, api_version)?;
@@ -203,7 +204,57 @@ impl Decode for RecordBatch {
             producer_id,
             producer_epoch,
             base_sequence,
+            records_count,
             records,
         })
+    }
+}
+
+impl RecordBatch {
+
+    pub fn parse_header(data: &Bytes) -> Result<Self> {
+        if data.len() < 61 {
+            return Err(ProtocolError::InvalidRecordBatchFormat);
+        }
+
+        let base_offset = i64::from_le_bytes(data[0..8].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("base_offset"))?);
+        let batch_length = i32::from_le_bytes(data[8..12].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("batch_length"))?);
+        let leader_epoch = i32::from_le_bytes(data[12..16].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("leader_epoch"))?);
+        let magic = data[16] as i8;
+        let crc = u32::from_le_bytes(data[17..21].try_into().map_err(|_e: std::array::TryFromSliceError| ProtocolError::InvalidRecordBatchCrc)?);
+        let attributes = i16::from_le_bytes(data[21..23].try_into().map_err(|_e: std::array::TryFromSliceError| ProtocolError::InvalidRecordBatchField("attributes"))?);
+        let last_offset_delta = i32::from_le_bytes(data[23..27].try_into().map_err(|_e: std::array::TryFromSliceError| ProtocolError::InvalidRecordBatchField("last_offset_delta"))?);
+        let first_timestamp = i64::from_le_bytes(data[27..35].try_into().map_err(|_e: std::array::TryFromSliceError| ProtocolError::InvalidRecordBatchField("first_timestamp"))?);
+        let max_timestamp = i64::from_le_bytes(data[35..43].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("max_timestamp"))?);
+        let producer_id = i64::from_le_bytes(data[43..51].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("producer_id"))?);
+        let producer_epoch = i16::from_le_bytes(data[51..53].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("producer_epoch"))?);
+        let base_sequence = i32::from_le_bytes(data[53..57].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("base_sequence"))?);
+        let records_count = i32::from_le_bytes(data[57..61].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("records_count"))?);
+
+        Ok(RecordBatch { 
+            base_offset,
+            batch_length,
+            leader_epoch,
+            magic,
+            crc,
+            attributes,
+            last_offset_delta,
+            first_timestamp,
+            max_timestamp,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            records_count,
+            records: Vec::new(),
+        })
+    }
+
+    pub fn verify_crc(&self, data: &Bytes) -> Result<()> {
+        let crc_data = &data[17..];
+        let computed_crc = crc32fast::hash(crc_data);
+        if computed_crc != self.crc {
+            return Err(ProtocolError::InvalidCrc);
+        }
+        Ok(())
     }
 }

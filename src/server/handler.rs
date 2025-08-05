@@ -113,7 +113,7 @@ async fn handle_produce(req: &ProduceRequest, broker: &Broker) -> Result<Respons
                 // The storage engine expects `&[Vec<u8>]`. We have `Bytes`.
                 // So we convert `Bytes` to `Vec<u8>` and wrap it in a slice.
                 // This is the correct way to pass the raw batch to the storage layer.
-                match broker.append_batch(&tp, &[record_batch_bytes.to_vec()]).await {
+                match broker.append_batch(&tp, record_batch_bytes.clone(), 1).await {
                     Ok(offset) => {
                         partition_responses.push(PartitionProduceResponse{
                             index: p_data.index,

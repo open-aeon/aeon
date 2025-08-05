@@ -10,6 +10,7 @@ storage:
   index_interval_bytes: 4096 # 4KB
   retention_policy_bytes: 10737418240 # 10GB
   retention_policy_ms: 604800000 # 7 days
+  preallocate: false
 
 log:
   level: "info"

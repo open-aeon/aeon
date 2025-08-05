@@ -8,6 +8,7 @@ pub struct StorageConfig {
     pub index_interval_bytes: usize,
     pub retention_policy_ms: Option<u128>,
     pub retention_policy_bytes: Option<u64>,
+    pub preallocate: bool,
 }
 
 impl Default for StorageConfig {
@@ -18,6 +19,7 @@ impl Default for StorageConfig {
             index_interval_bytes: 4096, // 4KB
             retention_policy_ms: None,
             retention_policy_bytes: None,
+            preallocate: false,
         }
     }
 } 

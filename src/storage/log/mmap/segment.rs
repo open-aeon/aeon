@@ -1,12 +1,12 @@
 use crate::error::storage::StorageError;
+use bytes::Bytes;
 use memmap2::{MmapMut, MmapOptions};
-use crc::{Crc, CRC_32_ISCSI};
 use std::{
     fs::{self,File, OpenOptions}, io::{BufReader, Read, Seek, SeekFrom, Write}, path::{Path, PathBuf}, time::SystemTime
 };
 
 const SEGMENT_SIZE: usize = 1024 * 1024 * 1024; // 1GB per segment
-// const INDEX_INTERVAL_BYTES: usize = 4 * 1024; // 4KB
+const INITIAL_SEGMENT_SIZE: usize = 1024 * 1024; // 1MB per segment
 
 pub struct LogSegment {
     log_path: PathBuf,
@@ -20,6 +20,7 @@ pub struct LogSegment {
     bytes_since_last_index: usize,
     index: Vec<(u32, u32)>,
     index_interval_bytes: usize,
+    preallocate: bool,
 }
 
 impl LogSegment {
@@ -41,7 +42,7 @@ impl LogSegment {
         Ok(modified_time)
     }
 
-    pub fn create(path: &Path, base_offset: u64, index_interval_bytes: usize) -> Result<Self, StorageError> {
+    pub fn create(path: &Path, base_offset: u64, index_interval_bytes: usize, preallocate: bool) -> Result<Self, StorageError> {
         let log_path = path.join(format!("{:020}.log", base_offset));
         let log_file = OpenOptions::new()
             .read(true)
@@ -49,7 +50,11 @@ impl LogSegment {
             .create_new(true)
             .open(&log_path)?;
 
-        log_file.set_len(SEGMENT_SIZE as u64)?;
+        if preallocate {
+            Self::preallocate_file(&log_file, SEGMENT_SIZE)?;
+        } else {
+            log_file.set_len(0)?;
+        }
 
         let index_path = path.join(format!("{:020}.index", base_offset));
         let index_file = OpenOptions::new()
@@ -57,6 +62,7 @@ impl LogSegment {
             .write(true)
             .create_new(true)
             .open(&index_path)?;
+        // index_file.sync_all()?;
             
         let mmap = unsafe { MmapOptions::new().map_mut(&log_file)? };
 
@@ -72,10 +78,11 @@ impl LogSegment {
             bytes_since_last_index: 0,
             index: Vec::new(),
             index_interval_bytes,
+            preallocate,
         })
     }
 
-    pub fn open(path: &Path, base_offset: u64, index_interval_bytes: usize) -> Result<Self, StorageError> {
+    pub fn open(path: &Path, base_offset: u64, index_interval_bytes: usize, preallocate: bool) -> Result<Self, StorageError> {
         let log_path = path.join(format!("{:020}.log", base_offset));
         let log_file = OpenOptions::new()
             .read(true)
@@ -84,8 +91,15 @@ impl LogSegment {
 
         let log_file_metadata = log_file.metadata()?;
         let log_file_size = log_file_metadata.len();
-        if log_file_size < SEGMENT_SIZE as u64 {
-                log_file.set_len(SEGMENT_SIZE as u64)?;
+        
+        if preallocate {
+            if log_file_size < SEGMENT_SIZE as u64 {
+                Self::preallocate_file(&log_file, SEGMENT_SIZE)?;
+            }
+        } else {
+            if log_file_size == 0 {
+                log_file.set_len(INITIAL_SEGMENT_SIZE as u64)?;
+            }
         }
 
         let index_path = path.join(format!("{:020}.index", base_offset));
@@ -115,49 +129,52 @@ impl LogSegment {
         }
         index_file.seek(SeekFrom::End(0))?;
 
+        // 从索引中恢复最后一个 batch 的位置
         if let Some(&(_, last_indexed_position)) = in_memory_index.last() {
             let pos = last_indexed_position as usize;
             if pos + 12 > log_file_metadata.len() as usize {
                 position = pos
             } else {
-                let len_bytes: [u8; 8] = mmap[pos..pos + 8].try_into().unwrap();
-                let record_len = u64::from_le_bytes(len_bytes);
-                position = pos + 12 +record_len as usize;
+                // 读取 RecordBatch 长度（第 8-12 字节，4字节，小端序）
+                let batch_len_bytes: [u8; 4] = mmap[pos + 8..pos + 12].try_into().unwrap();
+                let batch_len = u32::from_le_bytes(batch_len_bytes) as usize;
+                position = pos + batch_len;
             }
             record_count = in_memory_index.last().map_or(0, |(ro, _)| ro + 1) as u64;
         }
 
-
+        // 扫描剩余的 RecordBatch，重建索引
         while position < log_file_size as usize {
             if position + 12 > log_file_size as usize {
                 break;
             }
-            let current_record_physical_pos = position as usize;
-            let len_bytes: [u8; 8] = mmap[position..position + 8].try_into().unwrap();
-            let record_len = u64::from_le_bytes(len_bytes);
-            let total_len = 12 + record_len as usize;
             
-            if record_len == 0 || total_len > log_file_size as usize {
+            let current_batch_physical_pos = position as usize;
+            
+            // 读取 RecordBatch 长度（第 8-12 字节）
+            let batch_len_bytes: [u8; 4] = mmap[position + 8..position + 12].try_into().unwrap();
+            let batch_len = u32::from_le_bytes(batch_len_bytes) as usize;
+            
+            // 验证 batch 完整性
+            if batch_len == 0 || position + batch_len > log_file_size as usize {
                 break;
             }
 
-            let crc_bytes: [u8; 4] = mmap[position + 8..position + 12].try_into().unwrap();
-            let stored_crc = u32::from_le_bytes(crc_bytes);
-
-            LogSegment::verify_record(&mmap, log_file_size as usize, position, record_len, stored_crc)?;
 
             let relative_offset = record_count as u32;
-            bytes_since_last_index += total_len;
+            bytes_since_last_index += batch_len;
+            
+            // 根据索引间隔决定是否创建索引条目
             if bytes_since_last_index >= index_interval_bytes || record_count == 0 {
                 let relative_offset_bytes = relative_offset.to_le_bytes();
-                let physical_position_bytes = (current_record_physical_pos as u32).to_le_bytes();
+                let physical_position_bytes = (current_batch_physical_pos as u32).to_le_bytes();
                 index_file.write_all(&relative_offset_bytes)?;
                 index_file.write_all(&physical_position_bytes)?;
-                in_memory_index.push((relative_offset, current_record_physical_pos as u32));
+                in_memory_index.push((relative_offset, current_batch_physical_pos as u32));
                 bytes_since_last_index = 0;
             }
 
-            position += total_len;
+            position += batch_len;
             record_count += 1;
         }
 
@@ -173,152 +190,214 @@ impl LogSegment {
             bytes_since_last_index,
             index: in_memory_index,
             index_interval_bytes,
+            preallocate,
         })
-
     }
 
-    pub fn append(&mut self, record: &[u8]) -> Result<u64, StorageError> {
-        let record_len = record.len() as u64;
-        let len_bytes = record_len.to_le_bytes();
+    fn preallocate_file(file: &File, size: usize) -> Result<(), StorageError> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = file.as_raw_fd();
 
-        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
-        let crc_bytes = crc.checksum(record);
-        let crc_bytes = crc_bytes.to_le_bytes();
+            let result = unsafe {
+                libc::fallocate(
+                    fd,
+                    libc::FALLOC_FL_KEEP_SIZE,
+                    0,
+                    size as i64,
+                )
+            };
+
+            if result != 0 {
+                return Err(StorageError::IOError(format!("fallocate failed: {}", std::io::Error::last_os_error())));
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            file.set_len(size as u64)?;
+        }
+
+        Ok(())
+    }
+
+    fn extend_file(&mut self, required_size: usize) -> Result<(), StorageError> {
+        if self.preallocate {
+            return Err(StorageError::SegmentFull);
+        }
+
+        let current_size = self.log_file.metadata()?.len() as usize;
+        if required_size > current_size {
+            let new_size = std::cmp::max(required_size, current_size * 2);
+            self.log_file.set_len(new_size as u64)?;
+            self.mmap = unsafe {
+                MmapOptions::new()
+                    .len(new_size)
+                    .map_mut(&self.log_file)?
+            };
+        }
+
+        Ok(())
+    }
+
+    pub fn append_batch(&mut self, data: &Bytes, record_count: u32) -> Result<u64, StorageError> {
+        if data.is_empty() {
+            return Ok(self.base_offset + self.record_count);
+        }
+
+        let total_len = data.len();
         
-        let total_len = 8 + 4 + record.len();
+        // 检查是否需要扩展文件
+        if self.position + total_len > self.mmap.len() {
+            self.extend_file(self.position + total_len)?;
+        }
 
         let physical_position = self.position as u32;
-
-        // Write message length
-        self.mmap[self.position..self.position + 8].copy_from_slice(&len_bytes);
-        // Write CRC
-        self.mmap[self.position + 8..self.position + 12].copy_from_slice(&crc_bytes);
-        // Write message content
-        self.mmap[self.position + 12..self.position + total_len].copy_from_slice(&record);
+        self.mmap[self.position..self.position + total_len].copy_from_slice(&data);
 
         self.position += total_len;
         self.bytes_since_last_index += total_len;
 
         let logical_offset = self.base_offset + self.record_count;
         let relative_offset = self.record_count as u32;
+        let last_logical_offset = logical_offset;
 
         if self.bytes_since_last_index >= self.index_interval_bytes || self.record_count == 0 {
-            let physical_position_for_index = physical_position as u32;
-            let physical_position_bytes = physical_position_for_index.to_le_bytes();
+            let physical_position_bytes = physical_position.to_le_bytes();
             let relative_offset_bytes = relative_offset.to_le_bytes();
-            let mut index_entry_bytes = Vec::with_capacity(4 + 4);
-            index_entry_bytes.extend_from_slice(&relative_offset_bytes);
-            index_entry_bytes.extend_from_slice(&physical_position_bytes);
-            self.index_file.write_all(&index_entry_bytes)?;
-            self.index.push((relative_offset, physical_position_for_index as u32));
+            self.index_file.write_all(&relative_offset_bytes)?;
+            self.index_file.write_all(&physical_position_bytes)?;
+            self.index.push((relative_offset, physical_position));
             self.bytes_since_last_index = 0;
         }
 
-        self.record_count += 1;
-
-        Ok(logical_offset)
-    }
-
-    pub fn append_batch(&mut self, data: &[Vec<u8>]) -> Result<u64, StorageError> {
-        if data.is_empty() {
-            return Ok(self.base_offset + self.record_count);
-        }
-
-        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
-        let mut last_logical_offset = 0;
-
-        for record in data {
-            let record_len = record.len() as u64;
-            let len_bytes = record_len.to_le_bytes();
-            let crc_bytes = crc.checksum(record).to_le_bytes();
-
-            let total_len = 8 + 4 + record.len();
-
-            if self.position + total_len > self.mmap.len() {
-                // todo: change to return the last logical offset
-                return Err(StorageError::SegmentFull);
-            }
-
-            let physical_position = self.position as u32;
-            self.mmap[self.position..self.position + 8].copy_from_slice(&len_bytes);
-            self.mmap[self.position + 8..self.position + 12].copy_from_slice(&crc_bytes);
-            self.mmap[self.position + 12..self.position + total_len].copy_from_slice(&record);
-
-            self.position += total_len;
-            self.bytes_since_last_index += total_len;
-
-            let logical_offset = self.base_offset + self.record_count;
-            let relative_offset = self.record_count as u32;
-            last_logical_offset = logical_offset;
-
-            if self.bytes_since_last_index >= self.index_interval_bytes || self.record_count == 0 {
-                let physical_position_bytes = physical_position.to_le_bytes();
-                let relative_offset_bytes = relative_offset.to_le_bytes();
-                self.index_file.write_all(&relative_offset_bytes)?;
-                self.index_file.write_all(&physical_position_bytes)?;
-                self.index.push((relative_offset, physical_position));
-                self.bytes_since_last_index = 0;
-            }
-
-            self.record_count += 1;
-        }
+        self.record_count += record_count as u64;
 
         Ok(last_logical_offset)
     }
 
-    // todo: 后续考虑改为返回一个引用
-    // pub fn read<'a>(&'a self, ...) -> Result<&'a [u8], StorageError>
-    pub fn read(&self, relative_offset: u32) -> Result<Option<Vec<u8>>, StorageError> {
-       let start_index = match self.index.binary_search_by_key(&relative_offset, |&(offset, _)| offset) {
-        Ok(index) => index,
-        Err(index) => {
-            if index == 0 {
-                return Ok(None);
-            }
-            index - 1
-        },
-       };
+    pub fn read_batch(&self, start_offset: u64, max_bytes: usize) -> Result<Vec<Bytes>, StorageError> {
+        // 先通过稀疏索引定位到起始物理位置
+        let start_index = match self.index.binary_search_by_key(&(start_offset as u32), |&(offset, _)| offset) {
+            Ok(index) => index,
+            Err(index) => {
+                if index == 0 {
+                    return Ok(vec![]);
+                }
+                index - 1
+            },
+        };
 
-       let (mut current_relative_offset, mut current_physical_position) = self.index[start_index];
-       loop {
-        if current_physical_position as usize >= self.position {
-            break;
-        }
-        if current_relative_offset > relative_offset {
-            break;
-        }
-        
-        let pos = current_physical_position as usize;
+        let (mut current_offset, mut current_pos) = self.index[start_index];
+        let mut result = Vec::new();
+        let mut total_bytes = 0;
 
-        if pos + 12  > self.position {
-            break;
-        }
-
-        let len_bytes: [u8; 8] = self.mmap[pos..pos + 8].try_into().unwrap();
-        let record_len = u64::from_le_bytes(len_bytes);
-
-        let crc_bytes: [u8; 4] = self.mmap[pos + 8..pos + 12].try_into().unwrap();
-        let stored_crc = u32::from_le_bytes(crc_bytes);
-
-        LogSegment::verify_record(&self.mmap, self.position, pos, record_len, stored_crc)?;
-        
-        if current_relative_offset == relative_offset {
-            let data_start = pos + 12;
-            let data_end = data_start + record_len as usize;
-
-            if data_end > self.position {
-                return Err(StorageError::InvalidOffset);
+        // 向后遍历，直到找到start_offset对应的batch
+        while current_pos < self.position as u32 {
+            let pos = current_pos as usize;
+            if pos + 12 > self.position {
+                break;
             }
 
-            let data = &self.mmap[data_start..data_end];
-            return Ok(Some(data.to_vec()));
+            // 读取batch头部，batch长度在第8-12字节（即[8..12]，4字节，le）
+            let batch_len_bytes: [u8; 4] = self.mmap[pos + 8..pos + 12].try_into().map_err(|_| StorageError::DataCorruption)?;
+            let batch_len = u32::from_le_bytes(batch_len_bytes) as usize;
+
+            let batch_end = pos + batch_len;
+            if batch_end > self.position {
+                break;
+            }
+
+            // 跳过offset小于start_offset的batch
+            if current_offset < start_offset as u32 {
+                current_offset += 1;
+                current_pos += batch_len as u32;
+                continue;
+            }
+
+            // 读取batch数据
+            let batch_data = &self.mmap[pos..batch_end];
+            if total_bytes + batch_data.len() > max_bytes && !result.is_empty() {
+                break;
+            }
+            result.push(Bytes::copy_from_slice(batch_data));
+            total_bytes += batch_data.len();
+
+            current_offset += 1;
+            current_pos += batch_len as u32;
         }
-        
-        current_relative_offset += 1;
-        current_physical_position += (12 + record_len) as u32;
-       }
-       Ok(None)
+
+        Ok(result)
     }
+
+    // todo: 预分配与动态增长模式下的不同逻辑
+    pub fn truncate(&mut self, offset: u64) -> Result<(), StorageError> {
+        let base_offset = self.base_offset as u64;
+
+        if offset < base_offset {
+            // offset在本segment之前，返回InvalidOffset错误
+            return Err(StorageError::InvalidOffset);
+        }
+
+        let rel_offset = (offset - base_offset) as u32;
+
+        // 二分查找index，找到第一个大于等于rel_offset的位置
+        let idx = match self.index.binary_search_by_key(&rel_offset, |&(logical_offset, _)| logical_offset) {
+            Ok(i) => i, // 精确命中
+            Err(i) => i, // 没有精确命中，i为第一个大于rel_offset的位置
+        };
+
+        // 如果idx为0，说明所有记录都大于要截断的offset，直接清空
+        if idx == 0 {
+            self.position = 0;
+            self.index.clear();
+            self.mmap.flush()?;
+            // 实际截断文件到0大小
+            self.log_file.set_len(0)?;
+            self.log_file.sync_all()?;
+            let new_mmap = unsafe { MmapOptions::new().map_mut(&self.log_file)? };
+            let _ = std::mem::replace(&mut self.mmap, new_mmap);
+            self.index_file.set_len(0)?;
+            self.index_file.sync_all()?;
+            return Ok(());
+        }
+
+        // 截断到idx之前的最后一个batch
+        let (_logical_offset, physical_pos) = self.index[idx - 1];
+        let pos = physical_pos as usize;
+
+        // 读取batch头部，batch长度在第8-12字节（即[8..12]，4字节，le）
+        if pos + 12 > self.position {
+            // 数据损坏，无法读取batch长度
+            return Err(StorageError::DataCorruption);
+        }
+        let batch_len_bytes: [u8; 4] = self.mmap[pos + 8..pos + 12]
+            .try_into()
+            .map_err(|_| StorageError::DataCorruption)?;
+        let batch_len = u32::from_le_bytes(batch_len_bytes) as usize;
+        let batch_end = pos + batch_len;
+
+        if batch_end > self.position {
+            return Err(StorageError::DataCorruption);
+        }
+
+        // 截断mmap文件
+        self.mmap.flush()?;
+        self.log_file.set_len(batch_end as u64)?;
+        self.log_file.sync_all()?;
+        let new_mmap = unsafe { MmapOptions::new().map_mut(&self.log_file)? };
+        let _ = std::mem::replace(&mut self.mmap,new_mmap );
+        self.position = batch_end;
+
+        // 截断index
+        self.index.truncate(idx);
+        self.index_file.set_len((idx * 8) as u64)?;
+        self.index_file.sync_all()?;
+
+        Ok(())
+    }
+
 
     pub fn flush(&mut self) -> Result<(), StorageError> {
         self.mmap.flush()?;
@@ -340,22 +419,5 @@ impl LogSegment {
         Ok(())
     }
 
-    fn verify_record(mmap: &MmapMut, position: usize, physical_pos: usize, len: u64, stored_crc: u32) -> Result<(), StorageError> {
-        let data_start = physical_pos + 12;
-        let data_end = data_start + len as usize;
-        
-        if data_end > position {
-            return Err(StorageError::DataCorruption); // 记录不完整
-        }
 
-        let data = &mmap[data_start..data_end];
-        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
-        let calculated_crc = crc.checksum(data);
-
-        if calculated_crc == stored_crc {
-            Ok(())
-        } else {
-            Err(StorageError::DataCorruption)
-        }
-    }
 } 
