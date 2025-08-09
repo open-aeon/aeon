@@ -3,7 +3,11 @@ use anyhow::Result;
 use crate::broker::Broker;
 use crate::common::metadata::TopicPartition;
 use crate::kafka::protocol::*;
+use crate::kafka::message::RecordBatch;
+use crate::kafka::codec::Decode;
 use crate::kafka::{Request, RequestType, Response, ResponseHeader, ResponseType};
+use crate::error::StorageError;
+use bytes::BytesMut;
 
 // todo: broker是否可以换为&Arc<Broker>
 pub async fn handle_request(request: Request, broker: &Broker) -> Result<Response> {
@@ -31,6 +35,7 @@ async fn handle_api_versions(_req: &ApiVersionsRequest, _broker: &Broker) -> Res
         error_code: 0,
         api_keys: vec![
             ApiVersion { api_key: 0, min_version: 0, max_version: 9, ..Default::default() }, // Produce
+            ApiVersion { api_key: 1, min_version: 0, max_version: 12, ..Default::default() }, // Fetch
             ApiVersion { api_key: 3, min_version: 0, max_version: 12, ..Default::default() }, // Metadata
             ApiVersion { api_key: 18, min_version: 0, max_version: 3, ..Default::default() },// ApiVersions
         ],
@@ -160,8 +165,108 @@ async fn handle_produce(req: &ProduceRequest, broker: &Broker) -> Result<Respons
 }
 
 async fn handle_fetch(req: &FetchRequest, broker: &Broker) -> Result<ResponseType> {
+    let mut topic_responses: Vec<FetchableTopicResponse> = Vec::with_capacity(req.topics.len());
+
+    for t in &req.topics {
+        let topic_name = t.topic.clone();
+        let mut partition_responses: Vec<PartitionData> = Vec::with_capacity(t.partitions.len());
+
+        for p in &t.partitions {
+            let tp = TopicPartition {
+                topic: topic_name.clone(),
+                partition: p.partition as u32,
+            };
+
+            if p.fetch_offset < 0 {
+                partition_responses.push(PartitionData {
+                    partition_index: p.partition,
+                    error_code: 1,
+                    high_watermark: 0,
+                    last_stable_offset: 0,
+                    log_start_offset: 0,
+                    ..Default::default()
+                });
+                continue;
+            }
+
+            let start_offset = p.fetch_offset as u64;
+            let max_bytes = if p.partition_max_bytes > 0 {
+                p.partition_max_bytes as usize
+            } else {
+                req.max_bytes.max(0) as usize
+            };
+
+            match broker.read_batch(&tp, start_offset, max_bytes).await {
+                Ok(batches) => {
+                    if batches.is_empty() {
+                        partition_responses.push(PartitionData{
+                            partition_index: p.partition,
+                            error_code: 0,
+                            high_watermark: p.fetch_offset,
+                            last_stable_offset: p.fetch_offset,
+                            log_start_offset: 0,
+                            records: None,
+                            ..Default::default()
+                        });
+                    } else {
+                        let mut last_batch_bytes = batches.last().unwrap().clone();
+                        let record_batch = RecordBatch::decode(&mut last_batch_bytes, 0)?;
+                        let next_offset = record_batch.base_offset + record_batch.last_offset_delta as i64 + 1;
+
+                        let mut buf = BytesMut::new();
+                        for b in batches {
+                            buf.extend_from_slice(&b);
+                        }
+                        let records_bytes = buf.freeze();
+
+                        partition_responses.push(PartitionData {
+                            partition_index: p.partition,
+                            error_code: 0,
+                            high_watermark: next_offset,
+                            last_stable_offset: next_offset,
+                            log_start_offset: 0,
+                            records: Some(records_bytes),
+                            ..Default::default()
+                        });
+                    }
+                }
+                Err(e) => {
+                    let (code, hw, lso) = if let Some(se) = e.downcast_ref::<StorageError>() {
+                        match se {
+                            StorageError::InvalidOffset => (1i16, -1i64, -1i64), // OFFSET_OUT_OF_RANGE
+                            _ => (1i16, -1i64, -1i64),
+                        }
+                    } else {
+                        let msg = e.to_string();
+                        if msg.contains("Topic not found") || msg.contains("Partition not found") {
+                            (3i16, -1i64, -1i64) // UNKNOWN_TOPIC_OR_PARTITION
+                        } else {
+                            (1i16, -1i64, -1i64)
+                        }
+                    };
+
+                    partition_responses.push(PartitionData {
+                        partition_index: p.partition,
+                        error_code: code,
+                        high_watermark: hw,
+                        last_stable_offset: lso,
+                        log_start_offset: 0,
+                        records: None,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+
+        topic_responses.push(FetchableTopicResponse {
+            topic: topic_name,
+            partitions: partition_responses,
+            ..Default::default()
+        });
+    }
+
     let response = FetchResponse {
-        responses: vec![],
+        responses: topic_responses,
         ..Default::default()
     };
     Ok(ResponseType::Fetch(response))

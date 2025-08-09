@@ -5,7 +5,7 @@ use tokio_util::codec::{Decoder, Encoder};
 use crate::error::protocol::ProtocolError;
 use crate::kafka::codec::{Decode, Encode};
 use crate::kafka::{
-    protocol::{ApiVersionsRequest, MetadataRequest, ProduceRequest},
+    protocol::*,
     Request, RequestHeader, RequestType, Response,
 };
 
@@ -50,6 +50,7 @@ impl Decoder for ServerCodec {
 
         let request_type = match header.api_key {
             0 => ProduceRequest::decode(&mut cursor, api_version).map(RequestType::Produce),
+            1 => FetchRequest::decode(&mut cursor, api_version).map(RequestType::Fetch),
             3 => MetadataRequest::decode(&mut cursor, api_version).map(RequestType::Metadata),
             18 => ApiVersionsRequest::decode(&mut cursor, api_version).map(RequestType::ApiVersions),
             _ => return Err(err_convert(ProtocolError::UnknownApiKey(header.api_key))),

@@ -23,6 +23,7 @@ fn is_flexible_version(api_key: i16, api_version: i16) -> bool {
         18 => api_version >= 3, // ApiVersions
         3  => api_version >= 9,  // Metadata
         0  => api_version >= 9,  // Produce
+        1 => api_version >= 12,  // Fetch
         _ => false, // Default to non-flexible for unknown keys
     }
 }
@@ -36,8 +37,16 @@ impl RequestHeader {
         let client_id = if is_flexible_version(api_key, api_version) {
             let val = CompactNullableString::decode(buf, api_version)?;
             let tagged_fields_count = u32::decode_varint(buf)?;
-            if tagged_fields_count > 0 {
-                return Err(ProtocolError::InvalidTaggedField);
+            for _ in 0..tagged_fields_count {
+                let _tag = u32::decode_varint(buf)?;
+                let size = u32::decode_varint(buf)?;
+                if buf.remaining() < size as usize {
+                    return Err(ProtocolError::Io(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "Not enough bytes to skip header tagged field",
+                    )));
+                }
+                buf.advance(size as usize);
             }
             val.0
         } else {
@@ -59,6 +68,7 @@ impl RequestHeader {
                 })?)
             }
         };
+        println!("header api_key={}, api_version={}, client_id={:?}", api_key, api_version, client_id);
 
         Ok(Self {
             api_key,
@@ -116,6 +126,7 @@ impl ResponseHeader {
             18 => api_version >= 3, // ApiVersions v3+ is flexible
             3  => api_version >= 9,  // Metadata v9+ is flexible
             0  => api_version >= 9,  // Produce v9+ is flexible
+            1  => api_version >= 12,  // Fetch v12+ is flexible
             _ => false,
         }
     }
