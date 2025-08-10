@@ -68,7 +68,6 @@ impl RequestHeader {
                 })?)
             }
         };
-        println!("header api_key={}, api_version={}, client_id={:?}", api_key, api_version, client_id);
 
         Ok(Self {
             api_key,
@@ -165,7 +164,7 @@ impl Encode for Response {
         match &self.response_type {
             ResponseType::Produce(response) => response.encode(buf, api_version),
             ResponseType::Fetch(response) => response.encode(buf, api_version),
-            ResponseType::ApiVersions(response) => response.encode(buf, self.api_version),
+            ResponseType::ApiVersions(response) => response.encode(buf, api_version),
             ResponseType::Metadata(response) => response.encode(buf, api_version),
         }
     }
