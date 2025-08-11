@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::Framed;
 use tokio::signal;
+use crate::kafka::codec::Encode;
 
 pub struct Server {
     broker: Arc<Broker>,
@@ -81,9 +82,13 @@ impl Server {
             };
 
             let response = handler::handle_request(request, &broker).await?;
+            // 在发送之前，打印要发送的字节数组
+            let mut buf = bytes::BytesMut::new();
+            response.encode(&mut buf, 0)?;
+            println!("[DEBUG] 即将发送的响应字节: {:?}", buf);
             framed.send(response).await?;
         }
 
-        Ok(())
+        Ok(()) 
     }
 } 

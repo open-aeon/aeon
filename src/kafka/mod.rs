@@ -38,44 +38,44 @@ fn is_flexible_version(api_key: i16, api_version: i16) -> bool {
 
 impl RequestHeader {
     pub fn decode_header(buf: &mut impl Buf) -> Result<Self> {
+        // 打印当前缓冲区的字节内容，便于调试
+        println!("[DEBUG] decode_header 原始字节: {:?}", buf.chunk());
         let api_key = i16::decode(buf, 0)?;
         let api_version = i16::decode(buf, 0)?;
         let correlation_id = i32::decode(buf, 0)?;
+        let client_id_len = i16::decode(buf, 0)?;
+        let client_id = if client_id_len < 0 {
+            None
+        } else {
+            let len = client_id_len as usize;
+            if buf.remaining() < len {
+                return Err(ProtocolError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Not enough bytes for client_id string",
+                )));
+            }
+            let mut bytes = vec![0u8; len];
+            buf.copy_to_slice(&mut bytes);
+            Some(String::from_utf8(bytes).map_err(|e| {
+                ProtocolError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            })?)
+        };
 
-        let client_id = if is_flexible_version(api_key, api_version) {
-            let val = CompactNullableString::decode(buf, api_version)?;
+        if is_flexible_version(api_key, api_version) {
+            // Flexible header: tagged fields are encoded as COUNT followed by COUNT*(tag,size,value)
             let tagged_fields_count = u32::decode_varint(buf)?;
             for _ in 0..tagged_fields_count {
-                let _tag = u32::decode_varint(buf)?;
-                let size = u32::decode_varint(buf)?;
-                if buf.remaining() < size as usize {
+                let _tag = u32::decode_varint(buf)?; // 跳过 tag
+                let size_to_skip = u32::decode_varint(buf)? as usize; // 读取 size
+                if buf.remaining() < size_to_skip {
                     return Err(ProtocolError::Io(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
                         "Not enough bytes to skip header tagged field",
                     )));
                 }
-                buf.advance(size as usize);
+                buf.advance(size_to_skip); // 跳过 tag 的内容
             }
-            val.0
-        } else {
-            let len = i16::decode(buf, api_version)?;
-            if len < 0 {
-                None
-            } else {
-                let len = len as usize;
-                if buf.remaining() < len {
-                     return Err(ProtocolError::Io(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "Not enough bytes for client_id string",
-                    )));
-                }
-                let mut bytes = vec![0u8; len];
-                buf.copy_to_slice(&mut bytes);
-                Some(String::from_utf8(bytes).map_err(|e| {
-                    ProtocolError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-                })?)
-            }
-        };
+        }
 
         Ok(Self {
             api_key,

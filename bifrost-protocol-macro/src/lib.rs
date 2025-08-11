@@ -157,7 +157,8 @@ pub fn kafka_protocol_derive(input: TokenStream) -> TokenStream {
     let flexible_decode_untagged_fields = untagged_fields.iter().map(|f| {
         let field_name = f.ident.as_ref().unwrap();
         let ty = &f.ty;
-        // Match on type for compact decoding
+
+
         if type_is_string(ty) {
             quote! { #field_name: { let tmp = crate::kafka::codec::CompactString::decode(buf, api_version)?; tmp.0 } }
         } else if let Some(inner) = type_is_option(ty) {
@@ -166,16 +167,22 @@ pub fn kafka_protocol_derive(input: TokenStream) -> TokenStream {
             } else if type_is_bytes(&inner) {
                 quote! { #field_name: { let tmp = crate::kafka::codec::CompactNullableBytes::decode(buf, api_version)?; tmp.0 } }
             } else if let Some(vec_inner) = type_is_vec(&inner) {
-                quote! { #field_name: { let tmp: Option<crate::kafka::codec::CompactVec<#vec_inner>> = Decode::decode(buf, api_version)?; tmp.map(|v| v.0) } }
+                quote! { #field_name: {
+                    let tmp: Option<crate::kafka::codec::CompactVec<#vec_inner>> = crate::kafka::codec::Decode::decode(buf, api_version)?;
+                    tmp.map(|v| v.0)
+                } }
             } else {
-                quote! { #field_name: Decode::decode(buf, api_version)? }
+                quote! { #field_name: crate::kafka::codec::Decode::decode(buf, api_version)? }
             }
         } else if type_is_bytes(ty) {
             quote! { #field_name: { let tmp = crate::kafka::codec::CompactBytes::decode(buf, api_version)?; tmp.0 } }
         } else if let Some(vec_inner) = type_is_vec(ty) {
-            quote! { #field_name: { let tmp: crate::kafka::codec::CompactVec<#vec_inner> = Decode::decode(buf, api_version)?; tmp.0 } }
+            quote! { #field_name: {
+                let tmp: crate::kafka::codec::CompactVec<#vec_inner> = crate::kafka::codec::Decode::decode(buf, api_version)?;
+                tmp.0
+            } }
         } else {
-            quote! { #field_name: Decode::decode(buf, api_version)? }
+            quote! { #field_name: crate::kafka::codec::Decode::decode(buf, api_version)? }
         }
     });
 
@@ -248,6 +255,7 @@ pub fn kafka_protocol_derive(input: TokenStream) -> TokenStream {
     let flexible_encode_untagged_fields = untagged_fields.iter().map(|f| {
         let field_name = f.ident.as_ref().unwrap();
         let ty = &f.ty;
+
         if type_is_string(ty) {
             quote! { crate::kafka::codec::CompactString(self.#field_name.clone()).encode(buf, api_version)?; }
         } else if let Some(inner) = type_is_option(ty) {

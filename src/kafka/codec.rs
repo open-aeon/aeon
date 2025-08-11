@@ -256,8 +256,14 @@ impl Encode for CompactString {
 }
 impl Decode for CompactString {
     fn decode(buf: &mut impl Buf, _: i16) -> Result<Self> {
-        let len = u32::decode_varint(buf)? - 1;
-        let len = len as usize;
+        let n = u32::decode_varint(buf)?;
+        if n == 0 {
+            return Err(ProtocolError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "CompactString cannot be null",
+            )));
+        }
+        let len = (n - 1) as usize;
         if buf.remaining() < len { return Err(ProtocolError::Io(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Not enough bytes for CompactString"))); }
         let mut bytes = vec![0u8; len];
         buf.copy_to_slice(&mut bytes);
@@ -283,9 +289,9 @@ impl Encode for CompactNullableString {
 }
 impl Decode for CompactNullableString {
     fn decode(buf: &mut impl Buf, _: i16) -> Result<Self> {
-        let len = u32::decode_varint(buf)?;
-        if len == 0 { return Ok(CompactNullableString(None)); }
-        let len = (len - 1) as usize;
+        let n = u32::decode_varint(buf)?;
+        if n == 0 { return Ok(CompactNullableString(None)); }
+        let len = (n - 1) as usize;
         if buf.remaining() < len { return Err(ProtocolError::Io(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Not enough bytes for CompactNullableString"))); }
         let mut bytes = vec![0u8; len];
         buf.copy_to_slice(&mut bytes);

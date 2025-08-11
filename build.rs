@@ -29,35 +29,28 @@ struct FieldSpec {
     #[serde(default)]
     tag: Option<u32>,
     #[serde(default)]
-    compact_versions: String,
-    #[serde(default)]
     nullable_versions: String,
 }
 
 fn map_type(field: &FieldSpec, defined_structs: &HashSet<String>) -> String {
     let json_type = &field.field_type;
-    let is_compact = !field.compact_versions.is_empty();
     let is_nullable = !field.nullable_versions.is_empty();
 
     let mut base_type = if json_type.starts_with("[]") {
         let inner_type_str = &json_type[2..];
-        
+
         let mut inner_field = field.clone();
         inner_field.field_type = inner_type_str.to_string();
-        // Nullability applies to the array, not the elements. Reset for the recursive call.
-        inner_field.nullable_versions = String::new(); 
-        
+
+        inner_field.nullable_versions = String::new();
+
         let rust_inner_type = map_type(&inner_field, defined_structs);
-        
-        if is_compact {
-            format!("CompactVec<{}>", rust_inner_type)
-        } else {
-            format!("Vec<{}>", rust_inner_type)
-        }
+
+        format!("Vec<{}>", rust_inner_type)
     } else {
         match json_type.as_str() {
-            "string" => if is_compact { "CompactString".to_string() } else { "String".to_string() },
-            "bytes" => if is_compact { "CompactBytes".to_string() } else { "bytes::Bytes".to_string() },
+            "string" => "String".to_string(),
+            "bytes" => "bytes::Bytes".to_string(),
             "records" => "bytes::Bytes".to_string(),
             "bool" => "bool".to_string(),
             "int8" => "i8".to_string(),
@@ -71,20 +64,15 @@ fn map_type(field: &FieldSpec, defined_structs: &HashSet<String>) -> String {
                 if defined_structs.contains(json_type.as_str()) {
                     json_type.to_string()
                 } else {
-                    "()".to_string() 
+                    "()".to_string()
                 }
             }
         }
     };
 
     if is_nullable {
-        if is_compact && json_type == "string" {
-            base_type = "CompactNullableString".to_string();
-        } else if is_compact && json_type == "bytes" {
-            base_type = "CompactNullableBytes".to_string();
-        } else {
-             base_type = format!("Option<{}>", base_type);
-        }
+        // 改动点: 对于标准类型，可空性总是由 Option<T> 处理。
+        base_type = format!("Option<{}>", base_type);
     }
     
     base_type

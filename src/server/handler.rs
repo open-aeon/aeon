@@ -20,7 +20,7 @@ pub async fn handle_request(request: Request, broker: &Broker) -> Result<Respons
         RequestType::Produce(req) => handle_produce(&req, broker).await?,
         RequestType::Fetch(req) => handle_fetch(&req, broker).await?,
         RequestType::ListOffsets(req) => handle_list_offsets(&req, broker).await?,
-        RequestType::ApiVersions(req) => handle_api_versions(&req, broker).await?,
+        RequestType::ApiVersions(req) => handle_api_versions(&req, broker, api_version).await?,
         RequestType::Metadata(req) => handle_metadata(&req, broker).await?,
     };
 
@@ -59,18 +59,39 @@ fn map_produce_error(e: &anyhow::Error) -> i16 {
     }
 }
 
-async fn handle_api_versions(_req: &ApiVersionsRequest, _broker: &Broker) -> Result<ResponseType> {
-    let response = ApiVersionsResponse {
-        error_code: 0,
-        api_keys: vec![
-            ApiVersion { api_key: 0, min_version: 0, max_version: 9, ..Default::default() }, // Produce
-            ApiVersion { api_key: 1, min_version: 0, max_version: 12, ..Default::default() }, // Fetch
-            ApiVersion { api_key: 2, min_version: 1, max_version: 10, ..Default::default() }, // ListOffsets
-            ApiVersion { api_key: 3, min_version: 0, max_version: 12, ..Default::default() }, // Metadata
-            ApiVersion { api_key: 18, min_version: 0, max_version: 3, ..Default::default() },// ApiVersions
-        ],
-        throttle_time_ms: 0,
-        ..Default::default()
+async fn handle_api_versions(_req: &ApiVersionsRequest, _broker: &Broker, api_version: i16) -> Result<ResponseType> {
+    let supported_keys = vec![
+        ApiVersion { api_key: 0, min_version: 3, max_version: 9, ..Default::default() },  // Produce
+        ApiVersion { api_key: 1, min_version: 4, max_version: 12, ..Default::default() }, // Fetch
+        ApiVersion { api_key: 3, min_version: 0, max_version: 12, ..Default::default() }, // Metadata
+        ApiVersion { api_key: 18, min_version: 0, max_version: 3, ..Default::default() }, // ApiVersions
+        // ... 在这里添加其他你支持的 API
+    ];
+    let response = if api_version >= 3 {
+        // 对于 v3 及以上的灵活版本，我们构建完整的结构体。
+        // 即使某些字段是默认值 (比如空的 Vec)，也要显式地包含它们。
+        // 这样，您的过程宏在 `encode` 时就能看到这些字段，并正确地应用灵活模式规则
+        // (如处理 tagged fields 和 compact types)。
+        ApiVersionsResponse {
+            error_code: 0,
+            api_keys: supported_keys,
+            throttle_time_ms: 0,
+            supported_features: vec![], // 即使为空，也要包含
+            finalized_features_epoch: -1,
+            finalized_features: vec![], // 即使为空，也要包含
+            zk_migration_ready: false,
+        }
+    } else {
+        // 对于 v3 之前的传统版本，我们只构建它们支持的字段。
+        // 过程宏在编码时，因为看不到 v3+ 的字段，所以会正确地生成传统格式的字节流。
+        ApiVersionsResponse {
+            error_code: 0,
+            api_keys: supported_keys,
+            throttle_time_ms: if api_version >= 1 { 0 } else { Default::default() }, // ThrottleTimeMs 是 v1+ 的字段
+            // 其他 v3+ 的字段在这里省略，它们会取默认值，
+            // 并且在传统模式编码时会被忽略。
+            ..Default::default()
+        }
     };
     Ok(ResponseType::ApiVersions(response))
 }

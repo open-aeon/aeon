@@ -18,6 +18,8 @@ impl Decoder for ServerCodec {
     type Error = std::io::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // 打印收到的原始字节内容，便于调试
+        println!("[DEBUG]收到原始字节: {:?}", &src[..]);
         if src.len() < 4 {
             return Ok(None);
         }
@@ -39,51 +41,11 @@ impl Decoder for ServerCodec {
             std::io::Error::new(std::io::ErrorKind::InvalidData, e)
         };
 
-        // println!("Decoding request, length: {}", len);
-        // println!("Body data: {:02x?}", &body_buf[4..]);
+        let header = RequestHeader::decode_header(&mut cursor).map_err(err_convert)?;
 
-        // Robust header decode with flexible/legacy fallback
-        let data = &body_buf[4..];
-        let mut try_flex = || -> Result<(RequestHeader, usize), ProtocolError> {
-            use crate::kafka::codec::{Decode, CompactNullableString, Varint};
-            let mut cur = Cursor::new(data);
-            let api_key = i16::decode(&mut cur, 0)?;
-            let api_version = i16::decode(&mut cur, 0)?;
-            let correlation_id = i32::decode(&mut cur, 0)?;
-            let client_id = CompactNullableString::decode(&mut cur, api_version)?.0;
-            // header tagged fields
-            let tagged_fields_count = u32::decode_varint(&mut cur)?;
-            for _ in 0..tagged_fields_count {
-                let _tag = u32::decode_varint(&mut cur)?;
-                let size = u32::decode_varint(&mut cur)? as usize;
-                if cur.get_ref().len() < (cur.position() as usize + size) {
-                    return Err(ProtocolError::Io(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Not enough bytes to skip header tagged field")));
-                }
-                let _ = cur.set_position(cur.position() + size as u64);
-            }
-            Ok((RequestHeader { api_key, api_version, correlation_id, client_id }, cur.position() as usize))
-        };
-
-        let mut try_legacy = || -> Result<(RequestHeader, usize), ProtocolError> {
-            use crate::kafka::codec::Decode;
-            let mut cur = Cursor::new(data);
-            let api_key = i16::decode(&mut cur, 0)?;
-            let api_version = i16::decode(&mut cur, 0)?;
-            let correlation_id = i32::decode(&mut cur, 0)?;
-            let client_id = <Option<String> as Decode>::decode(&mut cur, api_version)?;
-            Ok((RequestHeader { api_key, api_version, correlation_id, client_id }, cur.position() as usize))
-        };
-
-        // Prefer flexible first, fallback to legacy; if flexible失败或越界则回退
-        let (header, header_len) = match try_flex() {
-            Ok(h) => h,
-            Err(_) => try_legacy().map_err(err_convert)?,
-        };
-        // reset cursor to after header for body decoding
-        let mut cursor = Cursor::new(&data[header_len..]);
         let api_version = header.api_version;
 
-        println!("Decoded header: api_key={}, api_version={}, correlation_id={}, client_id={:?}", 
+        println!("[DEBUG]Decoded header: api_key={}, api_version={}, correlation_id={}, client_id={:?}", 
                  header.api_key, header.api_version, header.correlation_id, header.client_id);
 
         let request_type = match header.api_key {
@@ -95,7 +57,7 @@ impl Decoder for ServerCodec {
             _ => return Err(err_convert(ProtocolError::UnknownApiKey(header.api_key))),
         }.map_err(err_convert)?;
 
-        // println!("Successfully decoded request type: {:?}", request_type);
+        println!("[DEBUG]Successfully decoded request type: {:?}", request_type);
 
         Ok(Some(Request { header, request_type }))
     }
