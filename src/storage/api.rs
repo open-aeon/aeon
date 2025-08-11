@@ -46,6 +46,15 @@ pub trait LogStorage: Send + Sync {
     /// A `Vec<Bytes>` where each `Bytes` element is a complete, raw `RecordBatch`.
     async fn read_batch(&self, start_offset: u64, max_bytes: usize) -> Result<Vec<Bytes>>;
 
+    /// Return the earliest logical offset available in this log (log start offset).
+    async fn earliest_offset(&self) -> Result<u64>;
+
+    /// Return the latest logical offset (the next offset after the last record in the log).
+    async fn latest_offset(&self) -> Result<u64>;
+
+    /// Alias of earliest_offset for clarity with Kafka naming.
+    async fn log_start_offset(&self) -> Result<u64> { self.earliest_offset().await }
+
     /// Truncates the log file to the specified physical byte position.
     ///
     /// This is a pure physical operation, invoked by the Broker's recovery logic

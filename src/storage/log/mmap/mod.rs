@@ -43,6 +43,26 @@ impl LogStorage for MmapLogStorage {
         Ok(batches)
     }
 
+    async fn earliest_offset(&self) -> Result<u64> {
+        let log_clone = self.log.clone();
+        let val = tokio::task::spawn_blocking(move || {
+            let log = log_clone.lock().expect("Fail to lock log");
+            // earliest = 第一个 segment 的 base_offset
+            log.segments.keys().next().copied().ok_or_else(|| anyhow!("Empty log"))
+        }).await??;
+        Ok(val)
+    }
+
+    async fn latest_offset(&self) -> Result<u64> {
+        let log_clone = self.log.clone();
+        let val = tokio::task::spawn_blocking(move || {
+            let log = log_clone.lock().expect("Fail to lock log");
+            let active = log.segments.get(&log.active_segment_offset).ok_or_else(|| anyhow!("No active segment"))?;
+            Ok::<u64, anyhow::Error>(active.base_offset() + active.record_count())
+        }).await??;
+        Ok(val)
+    }
+
     async fn truncate(&mut self, offset: u64) -> Result<()> {
         let log_clone = self.log.clone();
         tokio::task::spawn_blocking(move || {

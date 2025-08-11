@@ -83,6 +83,24 @@ impl Topic {
         }
     }
 
+    pub async fn earliest_offset(&self, p_id: u32) -> Result<u64> {
+        let partition = self.partitions.read().await;
+        if let Some(partition) = partition.get(&p_id) {
+            partition.earliest_offset().await
+        } else {
+            Err(anyhow::anyhow!("Partition not found: {}", p_id))
+        }
+    }
+
+    pub async fn latest_offset(&self, p_id: u32) -> Result<u64> {
+        let partition = self.partitions.read().await;
+        if let Some(partition) = partition.get(&p_id) {
+            partition.latest_offset().await
+        } else {
+            Err(anyhow::anyhow!("Partition not found: {}", p_id))
+        }
+    }
+
     pub async fn partition_count(&self) -> usize {
         self.partitions.read().await.len()
     }

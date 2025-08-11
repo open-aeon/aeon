@@ -19,6 +19,7 @@ pub async fn handle_request(request: Request, broker: &Broker) -> Result<Respons
     let response_type = match request.request_type {
         RequestType::Produce(req) => handle_produce(&req, broker).await?,
         RequestType::Fetch(req) => handle_fetch(&req, broker).await?,
+        RequestType::ListOffsets(req) => handle_list_offsets(&req, broker).await?,
         RequestType::ApiVersions(req) => handle_api_versions(&req, broker).await?,
         RequestType::Metadata(req) => handle_metadata(&req, broker).await?,
     };
@@ -64,6 +65,7 @@ async fn handle_api_versions(_req: &ApiVersionsRequest, _broker: &Broker) -> Res
         api_keys: vec![
             ApiVersion { api_key: 0, min_version: 0, max_version: 9, ..Default::default() }, // Produce
             ApiVersion { api_key: 1, min_version: 0, max_version: 12, ..Default::default() }, // Fetch
+            ApiVersion { api_key: 2, min_version: 1, max_version: 10, ..Default::default() }, // ListOffsets
             ApiVersion { api_key: 3, min_version: 0, max_version: 12, ..Default::default() }, // Metadata
             ApiVersion { api_key: 18, min_version: 0, max_version: 3, ..Default::default() },// ApiVersions
         ],
@@ -301,4 +303,51 @@ async fn handle_fetch(req: &FetchRequest, broker: &Broker) -> Result<ResponseTyp
         ..Default::default()
     };
     Ok(ResponseType::Fetch(response))
+}
+
+async fn handle_list_offsets(req: &ListOffsetsRequest, broker: &Broker) -> Result<ResponseType> {
+    // 语义：ListOffsets v1+，每个分区只返回一个 offset
+    // Timestamp 约定：-2=earliest, -1=latest，其它时间戳暂返回 OFFSET_NOT_AVAILABLE(103)
+    let mut topic_responses: Vec<ListOffsetsTopicResponse> = Vec::with_capacity(req.topics.len());
+    for t in &req.topics {
+        let mut part_responses: Vec<ListOffsetsPartitionResponse> = Vec::with_capacity(t.partitions.len());
+        for p in &t.partitions {
+            let tp = TopicPartition { topic: t.name.clone(), partition: p.partition_index as u32 };
+            let (error_code, timestamp, offset, leader_epoch) = if p.timestamp == -2 { // earliest
+                match broker.earliest_offset(&tp).await {
+                    Ok(off) => (0i16, -1i64, off as i64, p.current_leader_epoch),
+                    Err(e) => {
+                        let msg = e.to_string();
+                        let code = if msg.contains("Topic not found") || msg.contains("Partition not found") { 3i16 } else { 1i16 };
+                        (code, -1, -1, p.current_leader_epoch)
+                    }
+                }
+            } else if p.timestamp == -1 { // latest
+                match broker.latest_offset(&tp).await {
+                    Ok(off) => (0i16, -1i64, off as i64, p.current_leader_epoch),
+                    Err(e) => {
+                        let msg = e.to_string();
+                        let code = if msg.contains("Topic not found") || msg.contains("Partition not found") { 3i16 } else { 1i16 };
+                        (code, -1, -1, p.current_leader_epoch)
+                    }
+                }
+            } else {
+                // 暂不实现按时间戳查找，返回 OFFSET_NOT_AVAILABLE(103)
+                (103i16, p.timestamp, -1i64, p.current_leader_epoch)
+            };
+
+            part_responses.push(ListOffsetsPartitionResponse{
+                partition_index: p.partition_index,
+                error_code,
+                timestamp,
+                offset,
+                leader_epoch,
+                ..Default::default()
+            });
+        }
+        topic_responses.push(ListOffsetsTopicResponse{ name: t.name.clone(), partitions: part_responses, ..Default::default() });
+    }
+
+    let resp = ListOffsetsResponse { topics: topic_responses, ..Default::default() };
+    Ok(ResponseType::ListOffsets(resp))
 }

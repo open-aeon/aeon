@@ -21,9 +21,17 @@ pub struct RequestHeader {
 fn is_flexible_version(api_key: i16, api_version: i16) -> bool {
     match api_key {
         18 => api_version >= 3, // ApiVersions
-        3  => api_version >= 9,  // Metadata
         0  => api_version >= 9,  // Produce
         1 => api_version >= 12,  // Fetch
+        2 => api_version >= 6,   // ListOffsets
+        3  => api_version >= 9,  // Metadata
+        8  => api_version >= 8, // OffsetCommit
+        9  => api_version >= 8, // OffsetFetch
+        10 => api_version >= 2, // FindCoordinator
+        11 => api_version >= 6, // JoinGroup
+        12 => api_version >= 4, // Heartbeat
+        13 => api_version >= 4, // LeaveGroup
+        14 => api_version >= 5, // SyncGroup
         _ => false, // Default to non-flexible for unknown keys
     }
 }
@@ -101,6 +109,7 @@ impl Encode for RequestHeader {
 pub enum RequestType {
     Produce(ProduceRequest),
     Fetch(FetchRequest),
+    ListOffsets(ListOffsetsRequest),
     Metadata(MetadataRequest),
     ApiVersions(ApiVersionsRequest),
 }
@@ -145,6 +154,7 @@ impl ResponseHeader {
 pub enum ResponseType {
     Produce(ProduceResponse),
     Fetch(FetchResponse),
+    ListOffsets(ListOffsetsResponse),
     ApiVersions(ApiVersionsResponse),
     Metadata(MetadataResponse),
 }
@@ -164,6 +174,7 @@ impl Encode for Response {
         match &self.response_type {
             ResponseType::Produce(response) => response.encode(buf, api_version),
             ResponseType::Fetch(response) => response.encode(buf, api_version),
+            ResponseType::ListOffsets(response) => response.encode(buf, api_version),
             ResponseType::ApiVersions(response) => response.encode(buf, api_version),
             ResponseType::Metadata(response) => response.encode(buf, api_version),
         }

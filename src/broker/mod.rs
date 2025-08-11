@@ -272,6 +272,24 @@ impl Broker {
         }
     }
 
+    pub async fn earliest_offset(&self, tp: &TopicPartition) -> Result<u64> {
+        let topics = self.topics.read().await;
+        if let Some(topic) = topics.get(&tp.topic) {
+            topic.earliest_offset(tp.partition).await
+        } else {
+            Err(anyhow::anyhow!("Topic not found: {}", tp.topic))
+        }
+    }
+
+    pub async fn latest_offset(&self, tp: &TopicPartition) -> Result<u64> {
+        let topics = self.topics.read().await;
+        if let Some(topic) = topics.get(&tp.topic) {
+            topic.latest_offset(tp.partition).await
+        } else {
+            Err(anyhow::anyhow!("Topic not found: {}", tp.topic))
+        }
+    }
+
     pub async fn get_topics_metadata(&self, topics: &[String]) -> Result<HashMap<String, TopicMetadata>> {
         let all_topics = self.topics.read().await;
         let mut meta = HashMap::new();

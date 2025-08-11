@@ -48,6 +48,16 @@ impl Partition {
         log.read_batch(start_offset, max_bytes).await
     }
 
+    pub async fn earliest_offset(&self) -> Result<u64> {
+        let log = self.log.lock().await;
+        log.earliest_offset().await
+    }
+
+    pub async fn latest_offset(&self) -> Result<u64> {
+        let log = self.log.lock().await;
+        log.latest_offset().await
+    }
+
     pub async fn flush(&self) -> Result<()> {
         let mut log = self.log.lock().await;
         log.flush().await
