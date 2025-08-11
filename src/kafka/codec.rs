@@ -134,45 +134,24 @@ impl Encode for Option<Bytes> {
     fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
         match self {
             Some(b) => {
-                 // Special case for 'records' type which uses Varint length
-                 // This is a bit of a hack. A better solution might involve a newtype.
-                if api_version == -1 { // Sentinel api_version for 'records'
-                    (b.len() as i32).encode_varint(buf);
-                    buf.put_slice(b);
-                    Ok(())
-                } else {
-                    b.encode(buf, api_version)
-                }
-            },
+                // Legacy (non-flexible) NULLABLE_BYTES encoding: int32 length + data
+                b.encode(buf, api_version)
+            }
             None => {
-                if api_version == -1 {
-                    (-1i32).encode_varint(buf);
-                    Ok(())
-                } else {
-                    (-1i32).encode(buf, api_version)
-                }
-            },
+                // Legacy (non-flexible) NULLABLE_BYTES null marker: int32 -1
+                (-1i32).encode(buf, api_version)
+            }
         }
     }
 }
 impl Decode for Option<Bytes> {
     fn decode(buf: &mut impl Buf, api_version: i16) -> Result<Self> {
-        // Special case for 'records' type which uses Varint length
-        if api_version == -1 { // Sentinel api_version for 'records'
-            let len = i32::decode_varint(buf)?;
-            if len == -1 { return Ok(None); }
-            if len < 0 { return Err(ProtocolError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid negative length for Records"))); }
-            let len = len as usize;
-            if buf.remaining() < len { return Err(ProtocolError::Io(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Not enough bytes for Records"))); }
-            Ok(Some(buf.copy_to_bytes(len)))
-        } else {
-            let len = i32::decode(buf, api_version)?;
-            if len == -1 { return Ok(None); }
-            if len < 0 { return Err(ProtocolError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid negative length for NullableBytes"))); }
-            let len = len as usize;
-            if buf.remaining() < len { return Err(ProtocolError::Io(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Not enough bytes for NullableBytes"))); }
-            Ok(Some(buf.copy_to_bytes(len)))
-        }
+        let len = i32::decode(buf, api_version)?;
+        if len == -1 { return Ok(None); }
+        if len < 0 { return Err(ProtocolError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid negative length for NullableBytes"))); }
+        let len = len as usize;
+        if buf.remaining() < len { return Err(ProtocolError::Io(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Not enough bytes for NullableBytes"))); }
+        Ok(Some(buf.copy_to_bytes(len)))
     }
 }
 
@@ -311,5 +290,142 @@ impl Decode for CompactNullableString {
         let mut bytes = vec![0u8; len];
         buf.copy_to_slice(&mut bytes);
         Ok(CompactNullableString(Some(String::from_utf8(bytes).map_err(|e| ProtocolError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?)))
+    }
+}
+
+// --- Compact Bytes Types ---
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct CompactBytes(pub Bytes);
+
+impl Encode for CompactBytes {
+    fn encode(&self, buf: &mut impl BufMut, _: i16) -> Result<()> {
+        use crate::kafka::codec::Varint;
+        let len = (self.0.len() as u32) + 1;
+        len.encode_varint(buf);
+        buf.put_slice(&self.0);
+        Ok(())
+    }
+}
+
+impl Decode for CompactBytes {
+    fn decode(buf: &mut impl Buf, _: i16) -> Result<Self> {
+        let n = u32::decode_varint(buf)?;
+        if n == 0 {
+            return Err(ProtocolError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "CompactBytes cannot be null",
+            )));
+        }
+        let len = (n - 1) as usize;
+        if buf.remaining() < len {
+            return Err(ProtocolError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Not enough bytes for CompactBytes",
+            )));
+        }
+        Ok(CompactBytes(buf.copy_to_bytes(len)))
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct CompactNullableBytes(pub Option<Bytes>);
+
+impl Encode for CompactNullableBytes {
+    fn encode(&self, buf: &mut impl BufMut, _: i16) -> Result<()> {
+        use crate::kafka::codec::Varint;
+        match &self.0 {
+            Some(b) => {
+                let len = (b.len() as u32) + 1;
+                len.encode_varint(buf);
+                buf.put_slice(b);
+            }
+            None => {
+                0u32.encode_varint(buf);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Decode for CompactNullableBytes {
+    fn decode(buf: &mut impl Buf, _: i16) -> Result<Self> {
+        let n = u32::decode_varint(buf)?;
+        if n == 0 {
+            return Ok(CompactNullableBytes(None));
+        }
+        let len = (n - 1) as usize;
+        if buf.remaining() < len {
+            return Err(ProtocolError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Not enough bytes for CompactNullableBytes",
+            )));
+        }
+        Ok(CompactNullableBytes(Some(buf.copy_to_bytes(len))))
+    }
+}
+
+// --- Compact Arrays ---
+impl<T: Encode> Encode for CompactVec<T> {
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        use crate::kafka::codec::Varint;
+        let len = (self.0.len() as u32) + 1;
+        len.encode_varint(buf);
+        for item in &self.0 {
+            item.encode(buf, api_version)?;
+        }
+        Ok(())
+    }
+}
+
+impl<T: Decode> Decode for CompactVec<T> {
+    fn decode(buf: &mut impl Buf, api_version: i16) -> Result<Self> {
+        let n = u32::decode_varint(buf)?;
+        if n == 0 {
+            return Err(ProtocolError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Compact array cannot be null",
+            )));
+        }
+        let len = (n - 1) as usize;
+        let mut v = Vec::with_capacity(len);
+        for _ in 0..len {
+            v.push(T::decode(buf, api_version)?);
+        }
+        Ok(CompactVec(v))
+    }
+}
+
+impl<T: Encode> Encode for Option<CompactVec<T>> {
+    fn encode(&self, buf: &mut impl BufMut, api_version: i16) -> Result<()> {
+        use crate::kafka::codec::Varint;
+        match self {
+            Some(cv) => {
+                let len = (cv.0.len() as u32) + 1;
+                len.encode_varint(buf);
+                for item in &cv.0 {
+                    item.encode(buf, api_version)?;
+                }
+                Ok(())
+            }
+            None => {
+                0u32.encode_varint(buf);
+                Ok(())
+            }
+        }
+    }
+}
+
+impl<T: Decode> Decode for Option<CompactVec<T>> {
+    fn decode(buf: &mut impl Buf, api_version: i16) -> Result<Self> {
+        let n = u32::decode_varint(buf)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        let len = (n - 1) as usize;
+        let mut v = Vec::with_capacity(len);
+        for _ in 0..len {
+            v.push(T::decode(buf, api_version)?);
+        }
+        Ok(Some(CompactVec(v)))
     }
 }

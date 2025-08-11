@@ -1,6 +1,7 @@
 use bytes::{Buf, BufMut, Bytes};
 use std::io::Cursor;
 use varuint::{ReadVarint, WriteVarint};
+use crc::{Crc, CRC_32_ISCSI};
 
 use crate::error::protocol::{ProtocolError, Result};
 use crate::kafka::codec::{Decode, Encode};
@@ -135,8 +136,10 @@ impl Encode for RecordBatch {
         
         let batch_length = temp_buf.len() as i32;
         
-        let crc_data_start = crc_placeholder_pos + 4;
-        let crc = crc32fast::hash(&temp_buf[crc_data_start..]);
+        // CRC32C (Castagnoli) over everything after CRC field, i.e., starting from attributes
+        let crc_data_start = crc_placeholder_pos + 4; // 4 bytes CRC field
+        const CRC32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
+        let crc = CRC32C.checksum(&temp_buf[crc_data_start..]);
 
         // Now write everything to the main buffer
         self.base_offset.encode(buf, api_version)?;
@@ -154,6 +157,7 @@ impl Decode for RecordBatch {
         let base_offset = i64::decode(buf, api_version)?;
         let batch_length = i32::decode(buf, api_version)?;
 
+        // batch_length不包含前面的 base_offset(8)+batch_length(4)，因此读取这么多字节即可
         let batch_buf = buf.copy_to_bytes(batch_length as usize);
         let mut batch_cursor = Cursor::new(&batch_buf);
 
@@ -165,9 +169,12 @@ impl Decode for RecordBatch {
         }
 
         let crc = u32::decode(&mut batch_cursor, api_version)?;
-        
-        let crc_data = &batch_buf[17..]; // 17 = pos of attributes
-        let computed_crc = crc32fast::hash(crc_data);
+
+        // batch_buf starts at leader_epoch. Attributes start at offset 4 (leader_epoch)
+        // + 1 (magic) + 4 (crc) = 9
+        let crc_data = &batch_buf[9..];
+        const CRC32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
+        let computed_crc = CRC32C.checksum(crc_data);
         if computed_crc != crc {
              return Err(ProtocolError::InvalidCrc);
         }
@@ -181,15 +188,8 @@ impl Decode for RecordBatch {
         let base_sequence = i32::decode(&mut batch_cursor, api_version)?;
         let records_count = i32::decode(&mut batch_cursor, api_version)?;
 
-        let records_bytes = batch_cursor.copy_to_bytes(batch_cursor.remaining());
-        
-        let mut records = Vec::with_capacity(records_count as usize);
-        if records_count > 0 {
-            let mut records_cursor = Cursor::new(records_bytes);
-            for _ in 0..records_count {
-                records.push(Record::decode(&mut records_cursor, api_version)?);
-            }
-        }
+        // 不再复制/解析 records 正文，避免越界/兼容压缩情况
+        let records = Vec::new();
 
         Ok(Self {
             base_offset,
@@ -217,19 +217,20 @@ impl RecordBatch {
             return Err(ProtocolError::InvalidRecordBatchFormat);
         }
 
-        let base_offset = i64::from_le_bytes(data[0..8].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("base_offset"))?);
-        let batch_length = i32::from_le_bytes(data[8..12].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("batch_length"))?);
-        let leader_epoch = i32::from_le_bytes(data[12..16].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("leader_epoch"))?);
+        // Big-endian (network order)
+        let base_offset = i64::from_be_bytes(data[0..8].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("base_offset"))?);
+        let batch_length = i32::from_be_bytes(data[8..12].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("batch_length"))?);
+        let leader_epoch = i32::from_be_bytes(data[12..16].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("leader_epoch"))?);
         let magic = data[16] as i8;
-        let crc = u32::from_le_bytes(data[17..21].try_into().map_err(|_e: std::array::TryFromSliceError| ProtocolError::InvalidRecordBatchCrc)?);
-        let attributes = i16::from_le_bytes(data[21..23].try_into().map_err(|_e: std::array::TryFromSliceError| ProtocolError::InvalidRecordBatchField("attributes"))?);
-        let last_offset_delta = i32::from_le_bytes(data[23..27].try_into().map_err(|_e: std::array::TryFromSliceError| ProtocolError::InvalidRecordBatchField("last_offset_delta"))?);
-        let first_timestamp = i64::from_le_bytes(data[27..35].try_into().map_err(|_e: std::array::TryFromSliceError| ProtocolError::InvalidRecordBatchField("first_timestamp"))?);
-        let max_timestamp = i64::from_le_bytes(data[35..43].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("max_timestamp"))?);
-        let producer_id = i64::from_le_bytes(data[43..51].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("producer_id"))?);
-        let producer_epoch = i16::from_le_bytes(data[51..53].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("producer_epoch"))?);
-        let base_sequence = i32::from_le_bytes(data[53..57].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("base_sequence"))?);
-        let records_count = i32::from_le_bytes(data[57..61].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("records_count"))?);
+        let crc = u32::from_be_bytes(data[17..21].try_into().map_err(|_e: std::array::TryFromSliceError| ProtocolError::InvalidRecordBatchCrc)?);
+        let attributes = i16::from_be_bytes(data[21..23].try_into().map_err(|_e: std::array::TryFromSliceError| ProtocolError::InvalidRecordBatchField("attributes"))?);
+        let last_offset_delta = i32::from_be_bytes(data[23..27].try_into().map_err(|_e: std::array::TryFromSliceError| ProtocolError::InvalidRecordBatchField("last_offset_delta"))?);
+        let first_timestamp = i64::from_be_bytes(data[27..35].try_into().map_err(|_e: std::array::TryFromSliceError| ProtocolError::InvalidRecordBatchField("first_timestamp"))?);
+        let max_timestamp = i64::from_be_bytes(data[35..43].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("max_timestamp"))?);
+        let producer_id = i64::from_be_bytes(data[43..51].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("producer_id"))?);
+        let producer_epoch = i16::from_be_bytes(data[51..53].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("producer_epoch"))?);
+        let base_sequence = i32::from_be_bytes(data[53..57].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("base_sequence"))?);
+        let records_count = i32::from_be_bytes(data[57..61].try_into().map_err(|_e| ProtocolError::InvalidRecordBatchField("records_count"))?);
 
         Ok(RecordBatch { 
             base_offset,
@@ -250,8 +251,10 @@ impl RecordBatch {
     }
 
     pub fn verify_crc(&self, data: &Bytes) -> Result<()> {
-        let crc_data = &data[17..];
-        let computed_crc = crc32fast::hash(crc_data);
+        // For the full buffer (starting at base_offset), CRC covers from attributes onward
+        let crc_data = &data[21..];
+        const CRC32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
+        let computed_crc = CRC32C.checksum(crc_data);
         if computed_crc != self.crc {
             return Err(ProtocolError::InvalidCrc);
         }

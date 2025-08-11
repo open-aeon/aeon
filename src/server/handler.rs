@@ -1,12 +1,13 @@
 use anyhow::Result;
 
 use crate::broker::Broker;
+use crate::error::protocol::ProtocolError;
+use crate::error::storage::StorageError;
 use crate::common::metadata::TopicPartition;
 use crate::kafka::protocol::*;
 use crate::kafka::message::RecordBatch;
 use crate::kafka::codec::Decode;
 use crate::kafka::{Request, RequestType, Response, ResponseHeader, ResponseType};
-use crate::error::StorageError;
 use bytes::BytesMut;
 
 // todo: broker是否可以换为&Arc<Broker>
@@ -28,6 +29,33 @@ pub async fn handle_request(request: Request, broker: &Broker) -> Result<Respons
         api_key,
         api_version,
     })
+}
+
+fn map_produce_error(e: &anyhow::Error) -> i16 {
+    // 2 = CORRUPT_MESSAGE, 17 = INVALID_RECORD, 3 = UNKNOWN_TOPIC_OR_PARTITION
+    if let Some(pe) = e.downcast_ref::<ProtocolError>() {
+        match pe {
+            ProtocolError::InvalidCrc | ProtocolError::InvalidRecordBatchCrc => 2,
+            ProtocolError::UnsupportedMagicByte(_)
+            | ProtocolError::InvalidRecordBatchFormat
+            | ProtocolError::InvalidRecordBatchField(_) => 17,
+            _ => 17,
+        }
+    } else if let Some(se) = e.downcast_ref::<StorageError>() {
+        match se {
+            StorageError::DataCorruption => 2,
+            _ => 17,
+        }
+    } else {
+        let msg = e.to_string();
+        if msg.contains("Topic not found") || msg.contains("Partition not found") {
+            3
+        } else if msg.contains("Record count mismatch") {
+            17
+        } else {
+            17
+        }
+    }
 }
 
 async fn handle_api_versions(_req: &ApiVersionsRequest, _broker: &Broker) -> Result<ResponseType> {
@@ -132,9 +160,12 @@ async fn handle_produce(req: &ProduceRequest, broker: &Broker) -> Result<Respons
                             "Error appending batch for topic {}-{}: {}",
                             topic_name, p_data.index, e
                         );
+                        // Map errors to Kafka error codes:
+                        // 2 = CORRUPT_MESSAGE, 17 = INVALID_RECORD, 3 = UNKNOWN_TOPIC_OR_PARTITION
+                        let code: i16 = map_produce_error(&e);
                         partition_responses.push(PartitionProduceResponse {
                             index: p_data.index,
-                            error_code: 3, // UNKNOWN_TOPIC_OR_PARTITION
+                            error_code: code,
                             base_offset: -1,
                             ..Default::default()
                         });
@@ -205,7 +236,7 @@ async fn handle_fetch(req: &FetchRequest, broker: &Broker) -> Result<ResponseTyp
                             high_watermark: p.fetch_offset,
                             last_stable_offset: p.fetch_offset,
                             log_start_offset: 0,
-                            records: None,
+                            records: Some(bytes::Bytes::new()),
                             ..Default::default()
                         });
                     } else {
@@ -251,7 +282,7 @@ async fn handle_fetch(req: &FetchRequest, broker: &Broker) -> Result<ResponseTyp
                         high_watermark: hw,
                         last_stable_offset: lso,
                         log_start_offset: 0,
-                        records: None,
+                        records: Some(bytes::Bytes::new()),
                         ..Default::default()
                     });
                 }

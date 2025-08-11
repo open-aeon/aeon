@@ -113,10 +113,69 @@ pub fn kafka_protocol_derive(input: TokenStream) -> TokenStream {
             })
         });
 
+    // Helper type inspectors
+    fn type_is_string(ty: &syn::Type) -> bool {
+        if let syn::Type::Path(tp) = ty { tp.path.segments.last().map(|s| s.ident == "String").unwrap_or(false) } else { false }
+    }
+    fn type_is_bytes(ty: &syn::Type) -> bool {
+        if let syn::Type::Path(tp) = ty {
+            let segs: Vec<_> = tp.path.segments.iter().collect();
+            if segs.len() == 2 && segs[0].ident == "bytes" && segs[1].ident == "Bytes" { return true; }
+            if segs.len() == 1 && segs[0].ident == "Bytes" { return true; }
+        }
+        false
+    }
+    fn type_is_vec(ty: &syn::Type) -> Option<syn::Type> {
+        if let syn::Type::Path(tp) = ty {
+            if let Some(seg) = tp.path.segments.last() {
+                if seg.ident == "Vec" {
+                    if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments {
+                        for arg in &ab.args {
+                            if let syn::GenericArgument::Type(t) = arg { return Some(t.clone()); }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+    fn type_is_option(ty: &syn::Type) -> Option<syn::Type> {
+        if let syn::Type::Path(tp) = ty {
+            if let Some(seg) = tp.path.segments.last() {
+                if seg.ident == "Option" {
+                    if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments {
+                        for arg in &ab.args {
+                            if let syn::GenericArgument::Type(t) = arg { return Some(t.clone()); }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     let flexible_decode_untagged_fields = untagged_fields.iter().map(|f| {
         let field_name = f.ident.as_ref().unwrap();
-        quote! {
-            #field_name: Decode::decode(buf, api_version)?
+        let ty = &f.ty;
+        // Match on type for compact decoding
+        if type_is_string(ty) {
+            quote! { #field_name: { let tmp = crate::kafka::codec::CompactString::decode(buf, api_version)?; tmp.0 } }
+        } else if let Some(inner) = type_is_option(ty) {
+            if type_is_string(&inner) {
+                quote! { #field_name: { let tmp = crate::kafka::codec::CompactNullableString::decode(buf, api_version)?; tmp.0 } }
+            } else if type_is_bytes(&inner) {
+                quote! { #field_name: { let tmp = crate::kafka::codec::CompactNullableBytes::decode(buf, api_version)?; tmp.0 } }
+            } else if let Some(vec_inner) = type_is_vec(&inner) {
+                quote! { #field_name: { let tmp: Option<crate::kafka::codec::CompactVec<#vec_inner>> = Decode::decode(buf, api_version)?; tmp.map(|v| v.0) } }
+            } else {
+                quote! { #field_name: Decode::decode(buf, api_version)? }
+            }
+        } else if type_is_bytes(ty) {
+            quote! { #field_name: { let tmp = crate::kafka::codec::CompactBytes::decode(buf, api_version)?; tmp.0 } }
+        } else if let Some(vec_inner) = type_is_vec(ty) {
+            quote! { #field_name: { let tmp: crate::kafka::codec::CompactVec<#vec_inner> = Decode::decode(buf, api_version)?; tmp.0 } }
+        } else {
+            quote! { #field_name: Decode::decode(buf, api_version)? }
         }
     });
 
@@ -188,8 +247,30 @@ pub fn kafka_protocol_derive(input: TokenStream) -> TokenStream {
 
     let flexible_encode_untagged_fields = untagged_fields.iter().map(|f| {
         let field_name = f.ident.as_ref().unwrap();
-        quote! {
-            self.#field_name.encode(buf, api_version)?;
+        let ty = &f.ty;
+        if type_is_string(ty) {
+            quote! { crate::kafka::codec::CompactString(self.#field_name.clone()).encode(buf, api_version)?; }
+        } else if let Some(inner) = type_is_option(ty) {
+            if type_is_string(&inner) {
+                quote! { crate::kafka::codec::CompactNullableString(self.#field_name.clone()).encode(buf, api_version)?; }
+            } else if type_is_bytes(&inner) {
+                quote! { crate::kafka::codec::CompactNullableBytes(self.#field_name.clone()).encode(buf, api_version)?; }
+            } else if type_is_vec(&inner).is_some() {
+                quote! {
+                    {
+                        let tmp = self.#field_name.as_ref().map(|v| crate::kafka::codec::CompactVec(v.clone()));
+                        tmp.encode(buf, api_version)?;
+                    }
+                }
+            } else {
+                quote! { self.#field_name.encode(buf, api_version)?; }
+            }
+        } else if type_is_bytes(ty) {
+            quote! { crate::kafka::codec::CompactBytes(self.#field_name.clone()).encode(buf, api_version)?; }
+        } else if type_is_vec(ty).is_some() {
+            quote! { crate::kafka::codec::CompactVec(self.#field_name.clone()).encode(buf, api_version)?; }
+        } else {
+            quote! { self.#field_name.encode(buf, api_version)?; }
         }
     });
 

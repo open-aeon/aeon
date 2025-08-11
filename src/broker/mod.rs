@@ -252,7 +252,9 @@ impl Broker {
 
         let topics = self.topics.read().await;
         if let Some(topic) = topics.get(&topic_name) {
-            topic.append_batch(p_id, data, record_count).await
+            // 让存储层负责回填 base_offset；我们在响应里返回该 base_offset
+            let assigned_base = topic.append_batch(p_id, data, record_count).await?;
+            Ok(assigned_base)
         } else {
             Err(anyhow::anyhow!("Topic not found: {}", topic_name))
         }

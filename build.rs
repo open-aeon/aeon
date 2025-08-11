@@ -94,6 +94,7 @@ fn map_type(field: &FieldSpec, defined_structs: &HashSet<String>) -> String {
 fn collect_specs_recursively(
     specs: &mut HashMap<String, MessageSpec>,
     fields: &[FieldSpec],
+    parent_flexible_versions: &str,
 ) {
     for field in fields {
         if !field.fields.is_empty() {
@@ -101,9 +102,11 @@ fn collect_specs_recursively(
             let new_spec = MessageSpec {
                 name: struct_name.clone(),
                 fields: field.fields.clone(),
-                flexible_versions: "".to_string(), // Inline structs don't have top-level flexible versions
+                // Inherit flexible versions from parent to ensure nested structs
+                // participate in compact encoding when the parent is flexible.
+                flexible_versions: parent_flexible_versions.to_string(),
             };
-            collect_specs_recursively(specs, &new_spec.fields);
+            collect_specs_recursively(specs, &new_spec.fields, parent_flexible_versions);
             specs.insert(struct_name, new_spec);
         }
     }
@@ -146,7 +149,7 @@ fn main() {
                 panic!("Failed to parse JSON from {}: {}", path.display(), e);
             });
             
-            collect_specs_recursively(&mut specs, &spec.fields);
+            collect_specs_recursively(&mut specs, &spec.fields, &spec.flexible_versions);
             specs.insert(spec.name.clone(), spec);
         }
     }

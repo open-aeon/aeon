@@ -18,7 +18,8 @@ pub struct LogSegment {
     base_offset: u64,
     record_count: u64,
     bytes_since_last_index: usize,
-    index: Vec<(u32, u32)>,
+    // (base_offset, physical_position)
+    index: Vec<(u64, u32)>,
     index_interval_bytes: usize,
     preallocate: bool,
 }
@@ -116,11 +117,13 @@ impl LogSegment {
         let mut position : usize = 0;
         let mut bytes_since_last_index : usize = 0;
         let mut buf = [0u8; 8];
-        let mut in_memory_index: Vec<(u32, u32)> = Vec::new();
+        let mut in_memory_index: Vec<(u64, u32)> = Vec::new();
         while let Ok(()) = index_reader.read_exact(&mut buf) {
-            let relative_offset = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+            // delta 表示该索引项对应的 base_offset 与 segment 起始 base_offset 的差值（即 base_offset - segment_base_offset），用于节省索引空间
+            let delta = u32::from_le_bytes(buf[0..4].try_into().unwrap());
             let physical_position = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-            in_memory_index.push((relative_offset, physical_position));
+            let base_off = base_offset + delta as u64;
+            in_memory_index.push((base_off, physical_position));
         }
         
         let clean_index_size: u64 = (in_memory_index.len() * 8) as u64;
@@ -137,10 +140,11 @@ impl LogSegment {
             } else {
                 // 读取 RecordBatch 长度（第 8-12 字节，4字节，小端序）
                 let batch_len_bytes: [u8; 4] = mmap[pos + 8..pos + 12].try_into().unwrap();
-                let batch_len = u32::from_le_bytes(batch_len_bytes) as usize;
-                position = pos + batch_len;
+                let batch_len = u32::from_be_bytes(batch_len_bytes) as usize;
+                // 总批大小 = 12 (base_offset + batch_length) + batch_len
+                position = pos + 12 + batch_len;
             }
-            record_count = in_memory_index.last().map_or(0, |(ro, _)| ro + 1) as u64;
+            record_count = in_memory_index.len() as u64;
         }
 
         // 扫描剩余的 RecordBatch，重建索引
@@ -151,30 +155,31 @@ impl LogSegment {
             
             let current_batch_physical_pos = position as usize;
             
-            // 读取 RecordBatch 长度（第 8-12 字节）
+            // 读取 RecordBatch 长度（第 8-12 字节，大端序）
             let batch_len_bytes: [u8; 4] = mmap[position + 8..position + 12].try_into().unwrap();
-            let batch_len = u32::from_le_bytes(batch_len_bytes) as usize;
+            let batch_len = u32::from_be_bytes(batch_len_bytes) as usize;
             
             // 验证 batch 完整性
-            if batch_len == 0 || position + batch_len > log_file_size as usize {
+            if batch_len == 0 || position + 12 + batch_len > log_file_size as usize {
                 break;
             }
 
 
-            let relative_offset = record_count as u32;
             bytes_since_last_index += batch_len;
             
             // 根据索引间隔决定是否创建索引条目
             if bytes_since_last_index >= index_interval_bytes || record_count == 0 {
-                let relative_offset_bytes = relative_offset.to_le_bytes();
-                let physical_position_bytes = (current_batch_physical_pos as u32).to_le_bytes();
-                index_file.write_all(&relative_offset_bytes)?;
-                index_file.write_all(&physical_position_bytes)?;
-                in_memory_index.push((relative_offset, current_batch_physical_pos as u32));
+                // 读取该批 base_offset
+                let base_bytes: [u8; 8] = mmap[current_batch_physical_pos..current_batch_physical_pos + 8].try_into().unwrap();
+                let batch_base = u64::from_be_bytes(base_bytes);
+                let delta = (batch_base - base_offset) as u32;
+                index_file.write_all(&delta.to_le_bytes())?;
+                index_file.write_all(&(current_batch_physical_pos as u32).to_le_bytes())?;
+                in_memory_index.push((batch_base, current_batch_physical_pos as u32));
                 bytes_since_last_index = 0;
             }
 
-            position += batch_len;
+            position += 12 + batch_len;
             record_count += 1;
         }
 
@@ -246,6 +251,9 @@ impl LogSegment {
             return Ok(self.base_offset + self.record_count);
         }
 
+        // 分配 base_offset = 当前分区下一条记录的绝对偏移
+        let assigned_base_offset: u64 = self.base_offset + self.record_count;
+
         let total_len = data.len();
         
         // 检查是否需要扩展文件
@@ -254,21 +262,29 @@ impl LogSegment {
         }
 
         let physical_position = self.position as u32;
-        self.mmap[self.position..self.position + total_len].copy_from_slice(&data);
+        // 先将整批数据拷贝到 mmap
+        let dst_range = self.position..self.position + total_len;
+        self.mmap[dst_range.clone()].copy_from_slice(&data);
+        // 再覆盖前 8 字节为分配后的 base_offset（不影响 CRC 覆盖范围）
+        let base_be = assigned_base_offset.to_be_bytes();
+        if total_len < 8 { return Err(StorageError::DataCorruption); }
+        self.mmap[self.position..self.position + 8].copy_from_slice(&base_be);
 
         self.position += total_len;
         self.bytes_since_last_index += total_len;
 
-        let logical_offset = self.base_offset + self.record_count;
-        let relative_offset = self.record_count as u32;
+        let logical_offset = assigned_base_offset;
         let last_logical_offset = logical_offset;
 
         if self.bytes_since_last_index >= self.index_interval_bytes || self.record_count == 0 {
-            let physical_position_bytes = physical_position.to_le_bytes();
-            let relative_offset_bytes = relative_offset.to_le_bytes();
-            self.index_file.write_all(&relative_offset_bytes)?;
-            self.index_file.write_all(&physical_position_bytes)?;
-            self.index.push((relative_offset, physical_position));
+            // 读取该批 base_offset（我们刚写入了它）
+            let pos = self.position - total_len;
+            let base_bytes: [u8; 8] = self.mmap[pos..pos+8].try_into().map_err(|_| StorageError::DataCorruption)?;
+            let batch_base = u64::from_be_bytes(base_bytes);
+            let delta = (batch_base - self.base_offset) as u32;
+            self.index_file.write_all(&delta.to_le_bytes())?;
+            self.index_file.write_all(&physical_position.to_le_bytes())?;
+            self.index.push((batch_base, physical_position));
             self.bytes_since_last_index = 0;
         }
 
@@ -279,7 +295,7 @@ impl LogSegment {
 
     pub fn read_batch(&self, start_offset: u64, max_bytes: usize) -> Result<Vec<Bytes>, StorageError> {
         // 先通过稀疏索引定位到起始物理位置
-        let start_index = match self.index.binary_search_by_key(&(start_offset as u32), |&(offset, _)| offset) {
+        let start_index = match self.index.binary_search_by_key(&start_offset, |&(base, _)| base) {
             Ok(index) => index,
             Err(index) => {
                 if index == 0 {
@@ -289,7 +305,7 @@ impl LogSegment {
             },
         };
 
-        let (mut current_offset, mut current_pos) = self.index[start_index];
+        let (_, mut current_pos) = self.index[start_index];
         let mut result = Vec::new();
         let mut total_bytes = 0;
 
@@ -300,19 +316,23 @@ impl LogSegment {
                 break;
             }
 
-            // 读取batch头部，batch长度在第8-12字节（即[8..12]，4字节，le）
+            // 读取batch头部，batch长度在第8-12字节（即[8..12]，4字节，be）
             let batch_len_bytes: [u8; 4] = self.mmap[pos + 8..pos + 12].try_into().map_err(|_| StorageError::DataCorruption)?;
-            let batch_len = u32::from_le_bytes(batch_len_bytes) as usize;
+            let batch_len = u32::from_be_bytes(batch_len_bytes) as usize;
 
-            let batch_end = pos + batch_len;
+            let batch_end = pos + 12 + batch_len;
             if batch_end > self.position {
                 break;
             }
 
-            // 跳过offset小于start_offset的batch
-            if current_offset < start_offset as u32 {
-                current_offset += 1;
-                current_pos += batch_len as u32;
+            // 判断该批是否覆盖 start_offset
+            let base_bytes: [u8; 8] = self.mmap[pos..pos+8].try_into().map_err(|_| StorageError::DataCorruption)?;
+            let batch_base = u64::from_be_bytes(base_bytes);
+            let last_delta_bytes: [u8; 4] = self.mmap[pos + 23..pos + 27].try_into().map_err(|_| StorageError::DataCorruption)?;
+            let last_delta = u32::from_be_bytes(last_delta_bytes) as u64;
+            let batch_last = batch_base + last_delta;
+            if start_offset > batch_last {
+                current_pos += (12 + batch_len) as u32;
                 continue;
             }
 
@@ -324,8 +344,7 @@ impl LogSegment {
             result.push(Bytes::copy_from_slice(batch_data));
             total_bytes += batch_data.len();
 
-            current_offset += 1;
-            current_pos += batch_len as u32;
+            current_pos += (12 + batch_len) as u32;
         }
 
         Ok(result)
@@ -343,7 +362,7 @@ impl LogSegment {
         let rel_offset = (offset - base_offset) as u32;
 
         // 二分查找index，找到第一个大于等于rel_offset的位置
-        let idx = match self.index.binary_search_by_key(&rel_offset, |&(logical_offset, _)| logical_offset) {
+        let idx = match self.index.binary_search_by_key(&rel_offset, |&(base, _)| ((base - base_offset) as u32)) {
             Ok(i) => i, // 精确命中
             Err(i) => i, // 没有精确命中，i为第一个大于rel_offset的位置
         };
@@ -367,7 +386,7 @@ impl LogSegment {
         let (_logical_offset, physical_pos) = self.index[idx - 1];
         let pos = physical_pos as usize;
 
-        // 读取batch头部，batch长度在第8-12字节（即[8..12]，4字节，le）
+        // 读取batch头部，batch长度在第8-12字节（即[8..12]，4字节，大端序）
         if pos + 12 > self.position {
             // 数据损坏，无法读取batch长度
             return Err(StorageError::DataCorruption);
@@ -375,8 +394,8 @@ impl LogSegment {
         let batch_len_bytes: [u8; 4] = self.mmap[pos + 8..pos + 12]
             .try_into()
             .map_err(|_| StorageError::DataCorruption)?;
-        let batch_len = u32::from_le_bytes(batch_len_bytes) as usize;
-        let batch_end = pos + batch_len;
+        let batch_len = u32::from_be_bytes(batch_len_bytes) as usize;
+        let batch_end = pos + 12 + batch_len;
 
         if batch_end > self.position {
             return Err(StorageError::DataCorruption);
