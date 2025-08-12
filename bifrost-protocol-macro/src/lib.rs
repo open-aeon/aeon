@@ -2,6 +2,21 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{self, parse_macro_input, Data, DeriveInput, Fields, Meta, NestedMeta};
 
+fn parse_version_range(version_str: &str) -> (i16, i16) {
+    if version_str.contains('+') {
+        let min = version_str.trim_end_matches('+').parse::<i16>().unwrap_or(0);
+        (min, i16::MAX)
+    } else if version_str.contains('-') {
+        let mut parts = version_str.splitn(2, '-');
+        let min = parts.next().unwrap().parse::<i16>().unwrap_or(0);
+        let max = parts.next().unwrap().parse::<i16>().unwrap_or(i16::MAX);
+        (min, max)
+    } else {
+        let ver = version_str.parse::<i16>().unwrap_or(0);
+        (ver, ver)
+    }
+}
+
 // Helper function to parse a version string like "X+" or "X-Y" into a min version number.
 fn parse_min_version(version_str: &str) -> i16 {
     version_str
@@ -158,31 +173,59 @@ pub fn kafka_protocol_derive(input: TokenStream) -> TokenStream {
         let field_name = f.ident.as_ref().unwrap();
         let ty = &f.ty;
 
+        let mut versions_str = "0+".to_string();
+        for attr in &f.attrs {
+            if attr.path.is_ident("kafka") {
+                if let Ok(Meta::List(meta_list)) = attr.parse_meta() {
+                    for nested in &meta_list.nested {
+                        if let NestedMeta::Meta(Meta::NameValue(nv)) = nested {
+                            if nv.path.is_ident("versions") {
+                                if let syn::Lit::Str(lit) = &nv.lit {
+                                    versions_str = lit.value();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let (min_v, max_v) = parse_version_range(&versions_str);
 
-        if type_is_string(ty) {
-            quote! { #field_name: { let tmp = crate::kafka::codec::CompactString::decode(buf, api_version)?; tmp.0 } }
+
+        let decode_logic = if type_is_string(ty) {
+            quote! { { let tmp = crate::kafka::codec::CompactString::decode(buf, api_version)?; tmp.0 } }
         } else if let Some(inner) = type_is_option(ty) {
             if type_is_string(&inner) {
-                quote! { #field_name: { let tmp = crate::kafka::codec::CompactNullableString::decode(buf, api_version)?; tmp.0 } }
+                quote! { { let tmp = crate::kafka::codec::CompactNullableString::decode(buf, api_version)?; tmp.0 } }
             } else if type_is_bytes(&inner) {
-                quote! { #field_name: { let tmp = crate::kafka::codec::CompactNullableBytes::decode(buf, api_version)?; tmp.0 } }
+                quote! { { let tmp = crate::kafka::codec::CompactNullableBytes::decode(buf, api_version)?; tmp.0 } }
             } else if let Some(vec_inner) = type_is_vec(&inner) {
-                quote! { #field_name: {
+                quote! { {
                     let tmp: Option<crate::kafka::codec::CompactVec<#vec_inner>> = crate::kafka::codec::Decode::decode(buf, api_version)?;
                     tmp.map(|v| v.0)
                 } }
             } else {
-                quote! { #field_name: crate::kafka::codec::Decode::decode(buf, api_version)? }
+                quote! { crate::kafka::codec::Decode::decode(buf, api_version)? }
             }
         } else if type_is_bytes(ty) {
-            quote! { #field_name: { let tmp = crate::kafka::codec::CompactBytes::decode(buf, api_version)?; tmp.0 } }
+            quote! { { let tmp = crate::kafka::codec::CompactBytes::decode(buf, api_version)?; tmp.0 } }
         } else if let Some(vec_inner) = type_is_vec(ty) {
-            quote! { #field_name: {
+            quote! { {
                 let tmp: crate::kafka::codec::CompactVec<#vec_inner> = crate::kafka::codec::Decode::decode(buf, api_version)?;
                 tmp.0
             } }
         } else {
-            quote! { #field_name: crate::kafka::codec::Decode::decode(buf, api_version)? }
+            quote! { crate::kafka::codec::Decode::decode(buf, api_version)? }
+        };
+
+        quote! {
+            #field_name: {
+                if api_version >= #min_v && api_version <= #max_v {
+                    #decode_logic
+                } else {
+                    Default::default()
+                }
+            }
         }
     });
 
@@ -256,7 +299,25 @@ pub fn kafka_protocol_derive(input: TokenStream) -> TokenStream {
         let field_name = f.ident.as_ref().unwrap();
         let ty = &f.ty;
 
-        if type_is_string(ty) {
+        let mut versions_str = "0+".to_string();
+        for attr in &f.attrs {
+            if attr.path.is_ident("kafka") {
+                if let Ok(Meta::List(meta_list)) = attr.parse_meta() {
+                    for nested in &meta_list.nested {
+                        if let NestedMeta::Meta(Meta::NameValue(nv)) = nested {
+                            if nv.path.is_ident("versions") {
+                                if let syn::Lit::Str(lit) = &nv.lit {
+                                    versions_str = lit.value();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let (min_v, max_v) = parse_version_range(&versions_str);
+
+        let encode_logic = if type_is_string(ty) {
             quote! { crate::kafka::codec::CompactString(self.#field_name.clone()).encode(buf, api_version)?; }
         } else if let Some(inner) = type_is_option(ty) {
             if type_is_string(&inner) {
@@ -279,6 +340,12 @@ pub fn kafka_protocol_derive(input: TokenStream) -> TokenStream {
             quote! { crate::kafka::codec::CompactVec(self.#field_name.clone()).encode(buf, api_version)?; }
         } else {
             quote! { self.#field_name.encode(buf, api_version)?; }
+        };
+
+        quote! {
+            if api_version >= #min_v && api_version <= #max_v {
+                #encode_logic
+            }
         }
     });
 

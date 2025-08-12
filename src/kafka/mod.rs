@@ -131,7 +131,6 @@ pub struct ResponseHeader {
 impl ResponseHeader {
     fn should_use_flexible_header(api_key: i16, api_version: i16) -> bool {
         match api_key {
-            18 => api_version >= 3, // ApiVersions v3+ is flexible
             3  => api_version >= 9,  // Metadata v9+ is flexible
             0  => api_version >= 9,  // Produce v9+ is flexible
             1  => api_version >= 12,  // Fetch v12+ is flexible

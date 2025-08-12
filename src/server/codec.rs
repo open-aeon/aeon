@@ -89,6 +89,7 @@ impl Encoder<Response> for ServerCodec {
         // And use the `put_i32` method from `BufMut` to write the length.
         len_slice.put_i32(len as i32);
 
+        println!("[DEBUG]Encoded response byte stream: {:?}", &dst[..]);
         Ok(())
     }
 }
