@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::broker::Broker;
 use crate::error::protocol::ProtocolError;
@@ -8,7 +9,7 @@ use crate::kafka::protocol::*;
 use crate::kafka::message::RecordBatch;
 use crate::kafka::codec::Decode;
 use crate::kafka::{Request, RequestType, Response, ResponseHeader, ResponseType};
-use bytes::BytesMut;
+use crate::utils::hash::calculate_hash;
 
 // todo: broker是否可以换为&Arc<Broker>
 pub async fn handle_request(request: Request, broker: &Broker) -> Result<Response> {
@@ -22,6 +23,10 @@ pub async fn handle_request(request: Request, broker: &Broker) -> Result<Respons
         RequestType::ListOffsets(req) => handle_list_offsets(&req, broker).await?,
         RequestType::ApiVersions(req) => handle_api_versions(&req, broker, api_version).await?,
         RequestType::Metadata(req) => handle_metadata(&req, broker).await?,
+        RequestType::FindCoordinator(req) => handle_find_coordinator(&req, broker, api_version).await?,
+        RequestType::JoinGroup(req) => handle_join_group(&req, broker).await?,
+        RequestType::SyncGroup(req) => handle_sync_group(&req, broker).await?,
+        RequestType::OffsetFetch(req) => handle_offset_fetch(&req, broker).await?,
     };
 
     Ok(Response {
@@ -63,33 +68,29 @@ async fn handle_api_versions(_req: &ApiVersionsRequest, _broker: &Broker, api_ve
     let supported_keys = vec![
         ApiVersion { api_key: 0, min_version: 3, max_version: 9, ..Default::default() },  // Produce
         ApiVersion { api_key: 1, min_version: 4, max_version: 12, ..Default::default() }, // Fetch
+        ApiVersion { api_key: 2, min_version: 1, max_version: 10, ..Default::default() }, // ListOffsets
         ApiVersion { api_key: 3, min_version: 0, max_version: 12, ..Default::default() }, // Metadata
+        ApiVersion { api_key: 9, min_version: 1, max_version: 10, ..Default::default() }, // OffsetFetch
+        ApiVersion { api_key: 10, min_version: 0, max_version: 4, ..Default::default() }, // FindCoordinator
+        ApiVersion { api_key: 11, min_version: 0, max_version: 9, ..Default::default() }, // JoinGroup
+        ApiVersion { api_key: 14, min_version: 0, max_version: 5, ..Default::default() }, // SyncGroup
         ApiVersion { api_key: 18, min_version: 0, max_version: 3, ..Default::default() }, // ApiVersions
-        // ... 在这里添加其他你支持的 API
     ];
     let response = if api_version >= 3 {
-        // 对于 v3 及以上的灵活版本，我们构建完整的结构体。
-        // 即使某些字段是默认值 (比如空的 Vec)，也要显式地包含它们。
-        // 这样，您的过程宏在 `encode` 时就能看到这些字段，并正确地应用灵活模式规则
-        // (如处理 tagged fields 和 compact types)。
         ApiVersionsResponse {
             error_code: 0,
             api_keys: supported_keys,
             throttle_time_ms: 0,
-            supported_features: vec![], // 即使为空，也要包含
+            supported_features: vec![],
             finalized_features_epoch: -1,
-            finalized_features: vec![], // 即使为空，也要包含
+            finalized_features: vec![],
             zk_migration_ready: false,
         }
     } else {
-        // 对于 v3 之前的传统版本，我们只构建它们支持的字段。
-        // 过程宏在编码时，因为看不到 v3+ 的字段，所以会正确地生成传统格式的字节流。
         ApiVersionsResponse {
             error_code: 0,
             api_keys: supported_keys,
-            throttle_time_ms: if api_version >= 1 { 0 } else { Default::default() }, // ThrottleTimeMs 是 v1+ 的字段
-            // 其他 v3+ 的字段在这里省略，它们会取默认值，
-            // 并且在传统模式编码时会被忽略。
+            throttle_time_ms: if api_version >= 1 { 0 } else { Default::default() }, 
             ..Default::default()
         }
     };
@@ -146,7 +147,7 @@ async fn handle_metadata(req: &MetadataRequest, broker: &Broker) -> Result<Respo
         cluster_id: Some("bifrost-cluster".to_string()), // Assuming a fixed cluster_id
         ..Default::default()
     };
-    println!("[DEBUG] Sending MetadataResponse: {:?}", response);
+    // println!("[DEBUG] Sending MetadataResponse: {:?}", response);
     Ok(ResponseType::Metadata(response))
 }
 
@@ -371,4 +372,368 @@ async fn handle_list_offsets(req: &ListOffsetsRequest, broker: &Broker) -> Resul
 
     let resp = ListOffsetsResponse { topics: topic_responses, ..Default::default() };
     Ok(ResponseType::ListOffsets(resp))
+}
+
+async fn handle_find_coordinator(req: &FindCoordinatorRequest, broker: &Broker, api_version: i16) -> Result<ResponseType> {
+    let broker_meta = broker.metadata();
+
+    if api_version >= 4 {
+        // --- 版本 v4+ (使用 coordinator_keys 数组) ---
+        let mut coordinators: Vec<Coordinator> = Vec::new();
+        let key_type = req.key_type; // 从顶层字段获取 key_type
+
+        for key_str in &req.coordinator_keys {
+            let mut coordinator = Coordinator {
+                key: key_str.clone(),
+                node_id: -1,
+                host: "".to_string(),
+                port: -1,
+                error_code: 0,
+                error_message: None,
+                ..Default::default()
+            };
+
+            if key_type == 0 { // 0 for GROUP
+                // --- 哈希计算逻辑 ---
+                let offsets_topic_partitions = broker.config.internal_topic_partitions as u64;
+                let partition_index = if offsets_topic_partitions > 0 {
+                    calculate_hash(key_str) % offsets_topic_partitions
+                } else {
+                    0
+                };
+                
+                // 在单节点Bifrost中，任何分区的Leader都是自己，所以直接返回自身信息
+                coordinator.node_id = broker_meta.id as i32;
+                coordinator.host = broker_meta.host.clone();
+                coordinator.port = broker_meta.port as i32;
+
+                println!(
+                    "[Coordinator] v4+ FindCoordinator for group '{}' maps to partition {} on local broker ({}:{}).",
+                    key_str, partition_index, broker_meta.host, broker_meta.port
+                );
+
+            } else { // 其他不支持的 key_type
+                println!("[Coordinator] v4+ FindCoordinator for unsupported key_type: {} for key '{}'", key_type, key_str);
+                coordinator.error_code = 33; // COORDINATOR_NOT_AVAILABLE
+                coordinator.error_message = Some("Unsupported key_type".to_string());
+            }
+            coordinators.push(coordinator);
+        }
+        
+        let response = FindCoordinatorResponse {
+            coordinators,
+            throttle_time_ms: 0,
+            ..Default::default()
+        };
+        return Ok(ResponseType::FindCoordinator(response));
+
+    } else {
+        // --- 版本 v0, v1, v2, v3 (使用单个 key) ---
+        let key_str = &req.key;
+        let key_type = req.key_type; // 对于 v0, 这个值会是默认的 0
+
+        let mut response_node_id = -1;
+        let mut response_host = String::new();
+        let mut response_port = -1;
+        let mut response_error_code = 0i16;
+
+        if key_type == 0 { // GROUP
+            // --- 哈希计算逻辑 ---
+            let offsets_topic_partitions = broker.config.internal_topic_partitions as u64;
+            let partition_index = if offsets_topic_partitions > 0 {
+                calculate_hash(key_str) % offsets_topic_partitions
+            } else {
+                0
+            };
+
+            // 在单节点Bifrost中，任何分区的Leader都是自己
+            response_node_id = broker_meta.id as i32;
+            response_host = broker_meta.host.clone();
+            response_port = broker_meta.port as i32;
+
+            println!(
+                "[Coordinator] v0-v3 FindCoordinator for group '{}' maps to partition {} on local broker ({}:{}).",
+                key_str, partition_index, response_host, response_port
+            );
+        } else {
+            println!("[Coordinator] Unsupported key_type: {} for key '{}'", key_type, key_str);
+            response_error_code = 33; // COORDINATOR_NOT_AVAILABLE
+        }
+
+        let response = FindCoordinatorResponse {
+            error_code: response_error_code,
+            node_id: response_node_id,
+            host: response_host,
+            port: response_port,
+            ..Default::default()
+        };
+        return Ok(ResponseType::FindCoordinator(response));
+    }
+}
+
+async fn handle_join_group(req: &JoinGroupRequest, broker: &Broker) -> Result<ResponseType> {
+    use crate::broker::coordinator as coord;
+
+    // v4+ 两步 Join：若 member_id 为空，先返回 MEMBER_ID_REQUIRED 并下发分配的 member_id
+    if req.member_id.is_empty() {
+        // 79 = MEMBER_ID_REQUIRED（Kafka 标准错误码）
+        let assigned = format!("bifrost-{}", uuid::Uuid::new_v4());
+        let resp = JoinGroupResponse {
+            throttle_time_ms: 0,
+            error_code: 79,
+            generation_id: 0,
+            protocol_type: Some("consumer".to_string()),
+            protocol_name: None,
+            leader: String::new(),
+            skip_assignment: false,
+            member_id: assigned,
+            members: Vec::new(),
+            ..Default::default()
+        };
+        return Ok(ResponseType::JoinGroup(resp));
+    }
+
+    let member_id = req.member_id.clone();
+
+    // 2) 计算超时：rebalance_timeout_ms 缺省时使用 session_timeout_ms
+    let session_timeout_ms = req.session_timeout_ms.max(0) as u64;
+    let rebalance_timeout_ms = if req.rebalance_timeout_ms <= 0 {
+        session_timeout_ms
+    } else {
+        req.rebalance_timeout_ms as u64
+    };
+
+    // 3) 协议与元数据
+    let supported_protocols: Vec<(String, Vec<u8>)> = req
+        .protocols
+        .iter()
+        .map(|p| (p.name.clone(), p.metadata.to_vec()))
+        .collect();
+
+    // 4) 发送到组协调器
+    let join_req = coord::JoinGroupRequest {
+        group_id: req.group_id.clone(),
+        member_id: member_id.clone(),
+        group_instance_id: req.group_instance_id.clone(),
+        session_timeout: session_timeout_ms,
+        rebalance_timeout: rebalance_timeout_ms,
+        topics: vec![], // 订阅主题由协议元数据/SyncGroup 阶段处理
+        supported_protocols,
+    };
+
+    let result = broker.join_group(join_req).await?;
+
+    // 5) 构造响应（按版本，过程宏会处理可用字段）
+    let members: Vec<JoinGroupResponseMember> = result
+        .members
+        .into_iter()
+        .map(|m| JoinGroupResponseMember {
+            member_id: m.id,
+            group_instance_id: None,
+            metadata: bytes::Bytes::from(m.metadata),
+            ..Default::default()
+        })
+        .collect();
+
+    let response = JoinGroupResponse {
+        throttle_time_ms: 0,
+        error_code: 0,
+        generation_id: result.generation_id as i32,
+        protocol_type: Some("consumer".to_string()),
+        protocol_name: result.protocol.clone(),
+        leader: result.leader_id,
+        skip_assignment: false,
+        member_id: result.member_id,
+        members,
+        ..Default::default()
+    };
+    println!("[DEBUG] JoinGroupResponse: {:?}", response);
+
+    Ok(ResponseType::JoinGroup(response))
+}
+
+async fn handle_sync_group(req: &SyncGroupRequest, broker: &Broker) -> Result<ResponseType> {
+    use crate::broker::coordinator as coord;
+
+    // 1) 解析 leader 的 assignment（只有 leader 会携带，其他成员为空）
+    fn decode_member_assignment(raw: &Bytes) -> anyhow::Result<Vec<(String, Vec<u32>)>> {
+        let mut buf = raw.clone();
+
+        // version
+        if buf.remaining() < 2 { return Ok(Vec::new()); }
+        let _version = buf.get_i16();
+
+        // partitions by topic
+        if buf.remaining() < 4 { return Ok(Vec::new()); }
+        let topic_count = buf.get_i32();
+        let mut result: Vec<(String, Vec<u32>)> = Vec::new();
+        if topic_count > 0 {
+            for _ in 0..topic_count {
+                if buf.remaining() < 2 { break; }
+                let name_len = buf.get_i16();
+                if name_len < 0 { break; }
+                let name_len = name_len as usize;
+                if buf.remaining() < name_len { break; }
+                let mut name_bytes = vec![0u8; name_len];
+                buf.copy_to_slice(&mut name_bytes);
+                let topic = String::from_utf8(name_bytes).unwrap_or_default();
+
+                if buf.remaining() < 4 { break; }
+                let parts_len = buf.get_i32();
+                let mut parts: Vec<u32> = Vec::with_capacity(parts_len.max(0) as usize);
+                if parts_len > 0 {
+                    for _ in 0..parts_len {
+                        if buf.remaining() < 4 { break; }
+                        let p = buf.get_i32();
+                        parts.push(p.max(0) as u32);
+                    }
+                }
+                result.push((topic, parts));
+            }
+        }
+
+        // userData (nullable bytes): i32 length, -1 means null. Skip if present.
+        if buf.remaining() >= 4 {
+            let ud_len = buf.get_i32();
+            if ud_len > 0 && buf.remaining() >= ud_len as usize {
+                let _ = buf.copy_to_bytes(ud_len as usize);
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn encode_member_assignment(assignment: &[(String, Vec<u32>)]) -> Bytes {
+        let mut buf = BytesMut::new();
+        // version = 0
+        buf.put_i16(0);
+        // topics array
+        buf.put_i32(assignment.len() as i32);
+        for (topic, parts) in assignment {
+            // topic string (i16 len + bytes)
+            let name_bytes = topic.as_bytes();
+            buf.put_i16(name_bytes.len() as i16);
+            buf.extend_from_slice(name_bytes);
+            // partitions array (i32 len + i32s)
+            buf.put_i32(parts.len() as i32);
+            for p in parts { buf.put_i32(*p as i32); }
+        }
+        // userData = null (-1)
+        buf.put_i32(-1);
+        buf.freeze()
+    }
+
+    let mut assignment_map: std::collections::HashMap<String, Vec<(String, Vec<u32>)>> = std::collections::HashMap::new();
+    for a in &req.assignments {
+        let parsed = decode_member_assignment(&a.assignment).unwrap_or_default();
+        assignment_map.insert(a.member_id.clone(), parsed);
+    }
+
+    // 2) 调用协调器，获取该成员的最终分配
+    let result = broker.sync_group(coord::SyncGroupRequest {
+        group_id: req.group_id.clone(),
+        member_id: req.member_id.clone(),
+        generation_id: req.generation_id as u32,
+        assignment: assignment_map,
+    }).await?;
+
+    // 3) 将该成员的 assignment 编码回标准的 MemberAssignment bytes
+    let encoded = encode_member_assignment(&result.assignment);
+
+    let response = SyncGroupResponse {
+        throttle_time_ms: 0,
+        error_code: 0,
+        protocol_type: req.protocol_type.clone(),
+        protocol_name: req.protocol_name.clone(),
+        assignment: encoded,
+        ..Default::default()
+    };
+    println!("[DEBUG] SyncGroupResponse: {:?}", response);
+    Ok(ResponseType::SyncGroup(response))
+}
+
+async fn handle_offset_fetch(req: &OffsetFetchRequest, broker: &Broker) -> Result<ResponseType> {
+    // 兼容 v1-7（单组 + topics 字段）与 v8+（groups 数组）。编码器会根据响应版本选择正确字段。
+    // 情况一：v8+，请求包含 groups 数组
+    if !req.groups.is_empty() {
+        let mut groups_resp: Vec<OffsetFetchResponseGroup> = Vec::with_capacity(req.groups.len());
+        for g in &req.groups {
+            let mut topics_resp: Vec<OffsetFetchResponseTopics> = Vec::new();
+            if let Some(topics) = &g.topics {
+                for t in topics {
+                    // 仅支持通过名称查询（v8-9）。若为 v10 TopicId，我们暂不支持并跳过。
+                    {
+                        let topic_name = t.name.clone();
+                        let mut partitions_resp: Vec<OffsetFetchResponsePartitions> = Vec::with_capacity(t.partition_indexes.len());
+                        for &p in &t.partition_indexes {
+                            let tp = TopicPartition { topic: topic_name.clone(), partition: p as u32 };
+                            let off = broker.fetch_offset(crate::broker::coordinator::FetchOffsetRequest { group_id: g.group_id.clone(), tp }).await.ok().flatten();
+                            partitions_resp.push(OffsetFetchResponsePartitions {
+                                partition_index: p,
+                                committed_offset: off.unwrap_or(-1),
+                                committed_leader_epoch: -1,
+                                metadata: None,
+                                error_code: 0,
+                                ..Default::default()
+                            });
+                        }
+                        topics_resp.push(OffsetFetchResponseTopics {
+                            name: topic_name.clone(),
+                            partitions: partitions_resp,
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+
+            groups_resp.push(OffsetFetchResponseGroup {
+                group_id: g.group_id.clone(),
+                topics: topics_resp,
+                error_code: 0,
+                ..Default::default()
+            });
+        }
+
+        let response = OffsetFetchResponse {
+            groups: groups_resp,
+            error_code: 0,
+            throttle_time_ms: 0,
+            ..Default::default()
+        };
+        println!("[DEBUG]OffsetFetchResponse: {:?}", response);
+        return Ok(ResponseType::OffsetFetch(response));
+    }
+
+    // 情况二：v1-7，单组 + topics 字段
+    let mut topics_resp: Vec<OffsetFetchResponseTopic> = Vec::new();
+    if let Some(topics) = &req.topics {
+        for t in topics {
+            let mut partitions_resp: Vec<OffsetFetchResponsePartition> = Vec::with_capacity(t.partition_indexes.len());
+            for &p in &t.partition_indexes {
+                let tp = TopicPartition { topic: t.name.clone(), partition: p as u32 };
+                let off = broker.fetch_offset(crate::broker::coordinator::FetchOffsetRequest { group_id: req.group_id.clone(), tp }).await.ok().flatten();
+                partitions_resp.push(OffsetFetchResponsePartition {
+                    partition_index: p,
+                    committed_offset: off.unwrap_or(-1),
+                    committed_leader_epoch: -1,
+                    metadata: None,
+                    error_code: 0,
+                    ..Default::default()
+                });
+            }
+            topics_resp.push(OffsetFetchResponseTopic {
+                name: t.name.clone(),
+                partitions: partitions_resp,
+                ..Default::default()
+            });
+        }
+    }
+
+    let response = OffsetFetchResponse {
+        topics: topics_resp,
+        error_code: 0,
+        throttle_time_ms: 0,
+        ..Default::default()
+    };
+    Ok(ResponseType::OffsetFetch(response))
 }

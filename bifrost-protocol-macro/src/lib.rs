@@ -200,20 +200,44 @@ pub fn kafka_protocol_derive(input: TokenStream) -> TokenStream {
             } else if type_is_bytes(&inner) {
                 quote! { { let tmp = crate::kafka::codec::CompactNullableBytes::decode(buf, api_version)?; tmp.0 } }
             } else if let Some(vec_inner) = type_is_vec(&inner) {
-                quote! { {
-                    let tmp: Option<crate::kafka::codec::CompactVec<#vec_inner>> = crate::kafka::codec::Decode::decode(buf, api_version)?;
-                    tmp.map(|v| v.0)
-                } }
+                if type_is_string(&vec_inner) {
+                    quote! { {
+                        let tmp: Option<crate::kafka::codec::CompactVec<crate::kafka::codec::CompactString>> = crate::kafka::codec::Decode::decode(buf, api_version)?;
+                        tmp.map(|cv| cv.0.into_iter().map(|cs| cs.0).collect())
+                    } }
+                } else if type_is_bytes(&vec_inner) {
+                    quote! { {
+                        let tmp: Option<crate::kafka::codec::CompactVec<crate::kafka::codec::CompactBytes>> = crate::kafka::codec::Decode::decode(buf, api_version)?;
+                        tmp.map(|cv| cv.0.into_iter().map(|cb| cb.0).collect())
+                    } }
+                } else {
+                    quote! { {
+                        let tmp: Option<crate::kafka::codec::CompactVec<#vec_inner>> = crate::kafka::codec::Decode::decode(buf, api_version)?;
+                        tmp.map(|v| v.0)
+                    } }
+                }
             } else {
                 quote! { crate::kafka::codec::Decode::decode(buf, api_version)? }
             }
         } else if type_is_bytes(ty) {
             quote! { { let tmp = crate::kafka::codec::CompactBytes::decode(buf, api_version)?; tmp.0 } }
         } else if let Some(vec_inner) = type_is_vec(ty) {
-            quote! { {
-                let tmp: crate::kafka::codec::CompactVec<#vec_inner> = crate::kafka::codec::Decode::decode(buf, api_version)?;
-                tmp.0
-            } }
+            if type_is_string(&vec_inner) {
+                quote! { {
+                    let tmp: crate::kafka::codec::CompactVec<crate::kafka::codec::CompactString> = crate::kafka::codec::Decode::decode(buf, api_version)?;
+                    tmp.0.into_iter().map(|cs| cs.0).collect()
+                } }
+            } else if type_is_bytes(&vec_inner) {
+                quote! { {
+                    let tmp: crate::kafka::codec::CompactVec<crate::kafka::codec::CompactBytes> = crate::kafka::codec::Decode::decode(buf, api_version)?;
+                    tmp.0.into_iter().map(|cb| cb.0).collect()
+                } }
+            } else {
+                quote! { {
+                    let tmp: crate::kafka::codec::CompactVec<#vec_inner> = crate::kafka::codec::Decode::decode(buf, api_version)?;
+                    tmp.0
+                } }
+            }
         } else {
             quote! { crate::kafka::codec::Decode::decode(buf, api_version)? }
         };
@@ -324,11 +348,33 @@ pub fn kafka_protocol_derive(input: TokenStream) -> TokenStream {
                 quote! { crate::kafka::codec::CompactNullableString(self.#field_name.clone()).encode(buf, api_version)?; }
             } else if type_is_bytes(&inner) {
                 quote! { crate::kafka::codec::CompactNullableBytes(self.#field_name.clone()).encode(buf, api_version)?; }
-            } else if type_is_vec(&inner).is_some() {
-                quote! {
-                    {
-                        let tmp = self.#field_name.as_ref().map(|v| crate::kafka::codec::CompactVec(v.clone()));
-                        tmp.encode(buf, api_version)?;
+            } else if let Some(vec_inner) = type_is_vec(&inner) {
+                if type_is_string(&vec_inner) {
+                    quote! {
+                        {
+                            let tmp = self.#field_name.as_ref().map(|v| {
+                                let wire: Vec<crate::kafka::codec::CompactString> = v.clone().into_iter().map(crate::kafka::codec::CompactString).collect();
+                                crate::kafka::codec::CompactVec(wire)
+                            });
+                            tmp.encode(buf, api_version)?;
+                        }
+                    }
+                } else if type_is_bytes(&vec_inner) {
+                    quote! {
+                        {
+                            let tmp = self.#field_name.as_ref().map(|v| {
+                                let wire: Vec<crate::kafka::codec::CompactBytes> = v.clone().into_iter().map(crate::kafka::codec::CompactBytes).collect();
+                                crate::kafka::codec::CompactVec(wire)
+                            });
+                            tmp.encode(buf, api_version)?;
+                        }
+                    }
+                } else {
+                    quote! {
+                        {
+                            let tmp = self.#field_name.as_ref().map(|v| crate::kafka::codec::CompactVec(v.clone()));
+                            tmp.encode(buf, api_version)?;
+                        }
                     }
                 }
             } else {
@@ -336,8 +382,24 @@ pub fn kafka_protocol_derive(input: TokenStream) -> TokenStream {
             }
         } else if type_is_bytes(ty) {
             quote! { crate::kafka::codec::CompactBytes(self.#field_name.clone()).encode(buf, api_version)?; }
-        } else if type_is_vec(ty).is_some() {
-            quote! { crate::kafka::codec::CompactVec(self.#field_name.clone()).encode(buf, api_version)?; }
+        } else if let Some(vec_inner) = type_is_vec(ty) {
+            if type_is_string(&vec_inner) {
+                quote! {
+                    {
+                        let wire: Vec<crate::kafka::codec::CompactString> = self.#field_name.clone().into_iter().map(crate::kafka::codec::CompactString).collect();
+                        crate::kafka::codec::CompactVec(wire).encode(buf, api_version)?;
+                    }
+                }
+            } else if type_is_bytes(&vec_inner) {
+                quote! {
+                    {
+                        let wire: Vec<crate::kafka::codec::CompactBytes> = self.#field_name.clone().into_iter().map(crate::kafka::codec::CompactBytes).collect();
+                        crate::kafka::codec::CompactVec(wire).encode(buf, api_version)?;
+                    }
+                }
+            } else {
+                quote! { crate::kafka::codec::CompactVec(self.#field_name.clone()).encode(buf, api_version)?; }
+            }
         } else {
             quote! { self.#field_name.encode(buf, api_version)?; }
         };

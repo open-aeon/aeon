@@ -66,6 +66,7 @@ pub enum GroupState {
 #[derive(Debug, Clone)]
 pub struct ConsumerMember {
     pub id: String,
+    pub group_instance_id: Option<String>,
     pub session_timeout: Duration,
     pub rebalance_timeout: Duration, // todo: 为什么要这个字段？
     pub topics: Vec<String>,
@@ -115,6 +116,24 @@ impl ConsumerGroup {
     }
 
     pub fn add_member(&mut self, member: ConsumerMember) {
+        // 静态成员：若带有 group_instance_id，则替换同 instance 的旧成员
+        if let Some(ref instance_id) = member.group_instance_id {
+            // 查找是否已有相同 instance_id 的成员
+            if let Some((old_id, _old_member)) = self.members.iter()
+                .find(|(_, m)| m.group_instance_id.as_ref() == Some(instance_id))
+                .map(|(k, v)| (k.clone(), v.clone())) {
+                // 保留旧成员的 assignment
+                let preserved_assignment = _old_member.assignment.clone();
+                self.members.remove(&old_id);
+                let mut new_member = member;
+                // 传承 assignment
+                if new_member.assignment.is_empty() {
+                    new_member.assignment = preserved_assignment;
+                }
+                self.members.insert(new_member.id.clone(), new_member);
+                return;
+            }
+        }
         self.members.insert(member.id.clone(), member);
     }
 
@@ -157,6 +176,9 @@ impl ConsumerGroup {
             self.protocol = None;
             return Ok(HashMap::new());
         }
+
+        // 自增代数，从 1 开始
+        self.generation_id = self.generation_id + 1;
 
         self.elect_leader()?;
 

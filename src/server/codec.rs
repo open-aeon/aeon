@@ -19,7 +19,7 @@ impl Decoder for ServerCodec {
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         // 打印收到的原始字节内容，便于调试
-        println!("[DEBUG]收到原始字节: {:?}", &src[..]);
+        // println!("[DEBUG]收到原始字节: {:?}", &src[..]);
         if src.len() < 4 {
             return Ok(None);
         }
@@ -53,6 +53,10 @@ impl Decoder for ServerCodec {
             1 => FetchRequest::decode(&mut cursor, api_version).map(RequestType::Fetch),
             2 => ListOffsetsRequest::decode(&mut cursor, api_version).map(RequestType::ListOffsets),
             3 => MetadataRequest::decode(&mut cursor, api_version).map(RequestType::Metadata),
+            9 => OffsetFetchRequest::decode(&mut cursor, api_version).map(RequestType::OffsetFetch),
+            10 => FindCoordinatorRequest::decode(&mut cursor, api_version).map(RequestType::FindCoordinator),
+            11 => JoinGroupRequest::decode(&mut cursor, api_version).map(RequestType::JoinGroup),
+            14 => SyncGroupRequest::decode(&mut cursor, api_version).map(RequestType::SyncGroup),
             18 => ApiVersionsRequest::decode(&mut cursor, api_version).map(RequestType::ApiVersions),
             _ => return Err(err_convert(ProtocolError::UnknownApiKey(header.api_key))),
         }.map_err(err_convert)?;
@@ -89,7 +93,7 @@ impl Encoder<Response> for ServerCodec {
         // And use the `put_i32` method from `BufMut` to write the length.
         len_slice.put_i32(len as i32);
 
-        println!("[DEBUG]Encoded response byte stream: {:?}", &dst[..]);
+        // println!("[DEBUG]Encoded response byte stream: {:?}", &dst[..]);
         Ok(())
     }
 }

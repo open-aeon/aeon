@@ -26,12 +26,12 @@ fn is_flexible_version(api_key: i16, api_version: i16) -> bool {
         2 => api_version >= 6,   // ListOffsets
         3  => api_version >= 9,  // Metadata
         8  => api_version >= 8, // OffsetCommit
-        9  => api_version >= 8, // OffsetFetch
-        10 => api_version >= 2, // FindCoordinator
+        9  => api_version >= 6, // OffsetFetch
+        10 => api_version >= 3, // FindCoordinator
         11 => api_version >= 6, // JoinGroup
         12 => api_version >= 4, // Heartbeat
         13 => api_version >= 4, // LeaveGroup
-        14 => api_version >= 5, // SyncGroup
+        14 => api_version >= 4, // SyncGroup
         _ => false, // Default to non-flexible for unknown keys
     }
 }
@@ -39,7 +39,7 @@ fn is_flexible_version(api_key: i16, api_version: i16) -> bool {
 impl RequestHeader {
     pub fn decode_header(buf: &mut impl Buf) -> Result<Self> {
         // 打印当前缓冲区的字节内容，便于调试
-        println!("[DEBUG] decode_header 原始字节: {:?}", buf.chunk());
+        // println!("[DEBUG] decode_header 原始字节: {:?}", buf.chunk());
         let api_key = i16::decode(buf, 0)?;
         let api_version = i16::decode(buf, 0)?;
         let correlation_id = i32::decode(buf, 0)?;
@@ -111,6 +111,10 @@ pub enum RequestType {
     Fetch(FetchRequest),
     ListOffsets(ListOffsetsRequest),
     Metadata(MetadataRequest),
+    OffsetFetch(OffsetFetchRequest),
+    FindCoordinator(FindCoordinatorRequest),
+    JoinGroup(JoinGroupRequest),
+    SyncGroup(SyncGroupRequest),
     ApiVersions(ApiVersionsRequest),
 }
 
@@ -134,6 +138,11 @@ impl ResponseHeader {
             3  => api_version >= 9,  // Metadata v9+ is flexible
             0  => api_version >= 9,  // Produce v9+ is flexible
             1  => api_version >= 12,  // Fetch v12+ is flexible
+            2  => api_version >= 6,   // ListOffsets v6+ is flexible
+            9 => api_version >= 6,    // OffsetFetch v6+ is flexible
+            10 => api_version >= 3,   // FindCoordinator v3+ is flexible
+            11 => api_version >= 6,   // JoinGroup v6+ is flexible
+            14 => api_version >= 4,   // SyncGroup v4+ is flexible
             _ => false,
         }
     }
@@ -156,6 +165,10 @@ pub enum ResponseType {
     ListOffsets(ListOffsetsResponse),
     ApiVersions(ApiVersionsResponse),
     Metadata(MetadataResponse),
+    JoinGroup(JoinGroupResponse),
+    SyncGroup(SyncGroupResponse),
+    FindCoordinator(FindCoordinatorResponse),
+    OffsetFetch(OffsetFetchResponse),
 }
 
 #[derive(Debug)]
@@ -176,6 +189,10 @@ impl Encode for Response {
             ResponseType::ListOffsets(response) => response.encode(buf, api_version),
             ResponseType::ApiVersions(response) => response.encode(buf, api_version),
             ResponseType::Metadata(response) => response.encode(buf, api_version),
+            ResponseType::JoinGroup(response) => response.encode(buf, api_version),
+            ResponseType::SyncGroup(response) => response.encode(buf, api_version),
+            ResponseType::FindCoordinator(response) => response.encode(buf, api_version),
+            ResponseType::OffsetFetch(response) => response.encode(buf, api_version),
         }
     }
 }
