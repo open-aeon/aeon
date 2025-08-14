@@ -18,7 +18,7 @@ log:
 broker:
   id: 0
   advertised_host: "127.0.0.1"
-  advertised_port: 9092
+  advertised_port: 8080
   data_dir: "data" 
   flush_interval_ms: 1000
   cleanup_interval_ms: 5000

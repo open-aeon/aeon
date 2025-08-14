@@ -25,6 +25,7 @@ fn is_flexible_version(api_key: i16, api_version: i16) -> bool {
         1 => api_version >= 12,  // Fetch
         2 => api_version >= 6,   // ListOffsets
         3  => api_version >= 9,  // Metadata
+        19 => api_version >= 5,  // CreateTopics
         8  => api_version >= 8, // OffsetCommit
         9  => api_version >= 6, // OffsetFetch
         10 => api_version >= 3, // FindCoordinator
@@ -111,6 +112,7 @@ pub enum RequestType {
     Fetch(FetchRequest),
     ListOffsets(ListOffsetsRequest),
     Metadata(MetadataRequest),
+    CreateTopics(CreateTopicsRequest),
     OffsetFetch(OffsetFetchRequest),
     FindCoordinator(FindCoordinatorRequest),
     JoinGroup(JoinGroupRequest),
@@ -139,6 +141,7 @@ impl ResponseHeader {
             0  => api_version >= 9,  // Produce v9+ is flexible
             1  => api_version >= 12,  // Fetch v12+ is flexible
             2  => api_version >= 6,   // ListOffsets v6+ is flexible
+            19 => api_version >= 5,   // CreateTopics v5+ is flexible
             9 => api_version >= 6,    // OffsetFetch v6+ is flexible
             10 => api_version >= 3,   // FindCoordinator v3+ is flexible
             11 => api_version >= 6,   // JoinGroup v6+ is flexible
@@ -165,6 +168,7 @@ pub enum ResponseType {
     ListOffsets(ListOffsetsResponse),
     ApiVersions(ApiVersionsResponse),
     Metadata(MetadataResponse),
+    CreateTopics(CreateTopicsResponse),
     JoinGroup(JoinGroupResponse),
     SyncGroup(SyncGroupResponse),
     FindCoordinator(FindCoordinatorResponse),
@@ -189,6 +193,7 @@ impl Encode for Response {
             ResponseType::ListOffsets(response) => response.encode(buf, api_version),
             ResponseType::ApiVersions(response) => response.encode(buf, api_version),
             ResponseType::Metadata(response) => response.encode(buf, api_version),
+            ResponseType::CreateTopics(response) => response.encode(buf, api_version),
             ResponseType::JoinGroup(response) => response.encode(buf, api_version),
             ResponseType::SyncGroup(response) => response.encode(buf, api_version),
             ResponseType::FindCoordinator(response) => response.encode(buf, api_version),

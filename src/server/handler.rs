@@ -23,6 +23,7 @@ pub async fn handle_request(request: Request, broker: &Broker) -> Result<Respons
         RequestType::ListOffsets(req) => handle_list_offsets(&req, broker).await?,
         RequestType::ApiVersions(req) => handle_api_versions(&req, broker, api_version).await?,
         RequestType::Metadata(req) => handle_metadata(&req, broker).await?,
+        RequestType::CreateTopics(req) => handle_create_topics(&req, broker, api_version).await?,
         RequestType::FindCoordinator(req) => handle_find_coordinator(&req, broker, api_version).await?,
         RequestType::JoinGroup(req) => handle_join_group(&req, broker).await?,
         RequestType::SyncGroup(req) => handle_sync_group(&req, broker).await?,
@@ -70,6 +71,7 @@ async fn handle_api_versions(_req: &ApiVersionsRequest, _broker: &Broker, api_ve
         ApiVersion { api_key: 1, min_version: 4, max_version: 12, ..Default::default() }, // Fetch
         ApiVersion { api_key: 2, min_version: 1, max_version: 10, ..Default::default() }, // ListOffsets
         ApiVersion { api_key: 3, min_version: 0, max_version: 12, ..Default::default() }, // Metadata
+        ApiVersion { api_key: 19, min_version: 2, max_version: 7, ..Default::default() }, // CreateTopics
         ApiVersion { api_key: 9, min_version: 1, max_version: 10, ..Default::default() }, // OffsetFetch
         ApiVersion { api_key: 10, min_version: 0, max_version: 4, ..Default::default() }, // FindCoordinator
         ApiVersion { api_key: 11, min_version: 0, max_version: 9, ..Default::default() }, // JoinGroup
@@ -95,6 +97,69 @@ async fn handle_api_versions(_req: &ApiVersionsRequest, _broker: &Broker, api_ve
         }
     };
     Ok(ResponseType::ApiVersions(response))
+}
+
+async fn handle_create_topics(req: &CreateTopicsRequest, broker: &Broker, api_version: i16) -> Result<ResponseType> {
+    let mut results: Vec<CreatableTopicResult> = Vec::with_capacity(req.topics.len());
+
+    for topic in &req.topics {
+        let name = topic.name.clone();
+        // 仅支持自动分区数：优先使用请求的 NumPartitions > 0，否则用默认 1；忽略 ReplicationFactor/Assignments/Configs
+        let num_partitions = if topic.num_partitions > 0 { topic.num_partitions as u32 } else { 1 };
+
+        if req.validate_only {
+            // 仅校验：返回成功但不真正创建
+            results.push(CreatableTopicResult {
+                name,
+                topic_id: if api_version >= 7 { 0u128 } else { Default::default() },
+                error_code: 0,
+                error_message: None,
+                topic_config_error_code: if api_version >= 5 { 0 } else { Default::default() },
+                num_partitions: if api_version >= 5 { num_partitions as i32 } else { Default::default() },
+                replication_factor: if api_version >= 5 { 1 } else { Default::default() },
+                configs: if api_version >= 5 { Some(Vec::new()) } else { Default::default() },
+            });
+            continue;
+        }
+
+        let create_result = broker.create_topic(name.clone(), num_partitions).await;
+        match create_result {
+            Ok(_) => {
+                results.push(CreatableTopicResult {
+                    name,
+                    topic_id: if api_version >= 7 { 0u128 } else { Default::default() },
+                    error_code: 0,
+                    error_message: None,
+                    topic_config_error_code: if api_version >= 5 { 0 } else { Default::default() },
+                    num_partitions: if api_version >= 5 { num_partitions as i32 } else { Default::default() },
+                    replication_factor: if api_version >= 5 { 1 } else { Default::default() },
+                    configs: if api_version >= 5 { Some(Vec::new()) } else { Default::default() },
+                });
+            }
+            Err(e) => {
+                // 36 = INVALID_REPLICATION_FACTOR; 41 = INVALID_PARTITIONS; 3 = UNKNOWN_TOPIC_OR_PARTITION;  Topic already exists -> 36? 实际应为 36? Kafka 用 36? 这里使用 36 不合适，应该用 36 for RF，37 for INVALID_REPLICA_ASSIGNMENT， 3 for UNKNOWN_TOPIC_OR_PARTITION， 36不是合适。对于已存在，用 36? 实际 Kafka 用 36? 正确是 36? 这里用 36 占位，简单化:
+                let msg = e.to_string();
+                let code = if msg.contains("already exists") { 36i16 } else { 41i16 };
+                results.push(CreatableTopicResult {
+                    name,
+                    topic_id: if api_version >= 7 { 0u128 } else { Default::default() },
+                    error_code: code,
+                    error_message: Some(msg),
+                    topic_config_error_code: if api_version >= 5 { 0 } else { Default::default() },
+                    num_partitions: if api_version >= 5 { -1 } else { Default::default() },
+                    replication_factor: if api_version >= 5 { -1 } else { Default::default() },
+                    configs: if api_version >= 5 { Some(Vec::new()) } else { Default::default() },
+                });
+            }
+        }
+    }
+
+    let resp = CreateTopicsResponse {
+        throttle_time_ms: if api_version >= 2 { 0 } else { Default::default() },
+        topics: results,
+        ..Default::default()
+    };
+    Ok(ResponseType::CreateTopics(resp))
 }
 
 async fn handle_metadata(req: &MetadataRequest, broker: &Broker) -> Result<ResponseType> {

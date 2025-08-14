@@ -53,6 +53,7 @@ impl Decoder for ServerCodec {
             1 => FetchRequest::decode(&mut cursor, api_version).map(RequestType::Fetch),
             2 => ListOffsetsRequest::decode(&mut cursor, api_version).map(RequestType::ListOffsets),
             3 => MetadataRequest::decode(&mut cursor, api_version).map(RequestType::Metadata),
+            19 => CreateTopicsRequest::decode(&mut cursor, api_version).map(RequestType::CreateTopics),
             9 => OffsetFetchRequest::decode(&mut cursor, api_version).map(RequestType::OffsetFetch),
             10 => FindCoordinatorRequest::decode(&mut cursor, api_version).map(RequestType::FindCoordinator),
             11 => JoinGroupRequest::decode(&mut cursor, api_version).map(RequestType::JoinGroup),
