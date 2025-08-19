@@ -54,7 +54,7 @@ impl LogSegment {
         if preallocate {
             Self::preallocate_file(&log_file, SEGMENT_SIZE)?;
         } else {
-            log_file.set_len(0)?;
+            log_file.set_len(INITIAL_SEGMENT_SIZE as u64)?;
         }
 
         let index_path = path.join(format!("{:020}.index", base_offset));

@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package raft;
+
+// Raft a message containing a Raft log entry.
+message AppendEntriesRequest {
+    // The leader's term.
+    uint64 term = 1;
+    // The leader's ID.
+    uint64 leader_id = 2;
+    // The index of the log entry immediately preceding the new ones.
+    uint64 prev_log_index = 3;
+    // The term of the `prev_log_index` entry.
+    uint64 prev_log_term = 4;
+    // The log entries to store (empty for heartbeat).
+    bytes entries = 5;
+    // The leader's commit index.
+    uint64 leader_commit = 6;
+}
+
+message AppendEntriesResponse {
+    // The current term, for leader to update itself.
+    uint64 term = 1;
+    // Will be true if follower contained entry matching `prev_log_index` and `prev_log_term`.
+    bool success = 2;
+    // A value used to implement the last-log-entry-in-term optimization.
+    uint64 conflict_opt = 3;
+}
+
+// A message sent to a peer when a candidate is requesting a vote.
+message RequestVoteRequest {
+    // The candidate's term.
+    uint64 term = 1;
+    // The candidate's ID.
+    uint64 candidate_id = 2;
+    // The index of the candidate's last log entry.
+    uint64 last_log_index = 3;
+    // The term of the candidate's last log entry.
+    uint64 last_log_term = 4;
+}
+
+message RequestVoteResponse {
+    // The current term, for candidate to update itself.
+    uint64 term = 1;
+    // Will be true if the vote was granted.
+    bool vote_granted = 2;
+}
+
+// A message sent to a peer when a candidate is requesting a vote.
+message InstallSnapshotRequest {
+    // The leader's term.
+    uint64 term = 1;
+    // The leader's ID.
+    uint64 leader_id = 2;
+    // The snapshot replaces all entries up through and including this index.
+    uint64 last_included_index = 3;
+    // The term of `last_included_index`.
+    uint64 last_included_term = 4;
+    // The byte offset where chunk is positioned in the snapshot file.
+    uint64 offset = 5;
+    // The raw bytes of the snapshot chunk, starting at `offset`.
+    bytes data = 6;
+    // Will be true if this is the last chunk.
+    bool done = 7;
+}
+
+message InstallSnapshotResponse {
+    // The current term, for leader to update itself.
+    uint64 term = 1;
+}
+
+service RaftService {
+    rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+    rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+    rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
+}

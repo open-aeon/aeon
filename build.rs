@@ -71,7 +71,6 @@ fn map_type(field: &FieldSpec, defined_structs: &HashSet<String>) -> String {
     };
 
     if is_nullable {
-        // 改动点: 对于标准类型，可空性总是由 Option<T> 处理。
         base_type = format!("Option<{}>", base_type);
     }
     
@@ -189,4 +188,10 @@ pub struct {name} {{
     }
 
     f.write_all(all_code.as_bytes()).unwrap();
+
+    // Raft gRPC generation
+    tonic_build::configure()
+        .compile(&["src/raft/proto/raft.proto"], &["src/raft/proto/"])
+        .unwrap();
+
 }
