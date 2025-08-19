@@ -7,6 +7,8 @@ pub struct BrokerConfig {
     pub advertised_host: String,
     pub advertised_port: u16,
     pub data_dir: PathBuf,
+    pub raft_listen_addr: String, 
+    pub raft_peers: Vec<String>,
 
     #[serde(default = "default_flush_interval")]
     pub flush_interval_ms: Option<u64>,

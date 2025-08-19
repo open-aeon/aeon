@@ -16,9 +16,12 @@ log:
   level: "info"
 
 broker:
-  id: 0
+  id: 1
   advertised_host: "127.0.0.1"
   advertised_port: 8080
-  data_dir: "data" 
+  data_dir: "data/broker1"
+  raft_listen_addr: "127.0.0.1:6001"
+  raft_peers: []
   flush_interval_ms: 1000
   cleanup_interval_ms: 5000
+  internal_topic_name: "__bifrost_offsets"

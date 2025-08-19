@@ -4,11 +4,10 @@ pub mod consumer_group;
 pub mod coordinator;
 
 use anyhow::{Context, Result};
-use tokio::sync::watch;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, Mutex, mpsc, oneshot};
+use tokio::sync::{RwLock, Mutex, mpsc, oneshot, watch};
 use bytes::Bytes;
 use chrono::Utc;
 
@@ -26,13 +25,17 @@ use crate::kafka::message::RecordBatch;
 use crate::kafka::offsets::{OffsetKey, OffsetValue};
 use crate::kafka::codec::Encode;
 use crate::utils::hash::calculate_hash;
+use crate::raft::raft_service::raft_service_server::RaftServiceServer;
+use crate::raft::server::RaftServer;
+
 
 pub struct Broker {
     pub config: Arc<BrokerConfig>,
     pub storage_config: Arc<StorageConfig>,
     topics: Arc<RwLock<HashMap<String, Topic>>>,
     metadata: BrokerMetadata,
-    shutdown_tx: Arc<Mutex<Option<tokio::sync::watch::Sender<()>>>>,
+    shutdown_tx: Arc<Mutex<Option<watch::Sender<()>>>>,
+    raft_shutdown_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     coordinators: DashMap<String, mpsc::Sender<CoordinatorCommand>>,
 }
 
@@ -57,6 +60,7 @@ impl Broker {
             topics, 
             metadata: metadata,
             shutdown_tx: Arc::new(Mutex::new(None)),
+            raft_shutdown_tx: Arc::new(Mutex::new(None)),
             coordinators: DashMap::new(),
         }
     }
@@ -64,6 +68,8 @@ impl Broker {
     pub async fn start(&self) -> Result<()> {
         let(tx, _) = watch::channel(());
         *self.shutdown_tx.lock().await = Some(tx);
+
+        self.start_raft_server().await?;
 
         let data_dir = &self.config.data_dir;
         std::fs::create_dir_all(data_dir)
@@ -116,7 +122,32 @@ impl Broker {
         Ok(())
     }
 
-    async fn subscribe_shutdown(&self) -> Result<watch::Receiver<()>> {
+    async fn start_raft_server(&self) -> Result<()> {
+        let addr = self.config.raft_listen_addr.parse()?;
+        let raft_server = RaftServer::default();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        *self.raft_shutdown_tx.lock().await = Some(shutdown_tx);
+
+
+        println!("[Raft] Raft server listening on {}", addr);
+
+        tokio::spawn(async move {
+            let server_future = tonic::transport::Server::builder()
+                .add_service(RaftServiceServer::new(raft_server))
+                .serve_with_shutdown(addr, async {
+                    shutdown_rx.await.ok();
+                });
+            
+            if let Err(e) = server_future.await {
+                eprintln!("[Raft] Raft server error: {}", e);
+            } else {
+                println!("[Raft] Raft server has shut down gracefully.");
+            }
+        });
+        Ok(())
+    }
+
+    pub async fn subscribe_shutdown(&self) -> Result<watch::Receiver<()>> {
         let tx = self.shutdown_tx.lock().await;
         if let Some(tx) = tx.as_ref() {
             Ok(tx.subscribe())
@@ -212,7 +243,25 @@ impl Broker {
             println!("Flushing topic: {}", name);
             topic.flush_all().await?
         }
-        println!("Broker shutdown complete");
+        
+        if let Some(tx) = self.shutdown_tx.lock().await.take() {
+            if tx.send(()).is_ok() {
+                println!("[Broker] Shutdown signal sent.");
+            } else {
+                println!("[Broker] Failed to send shutdown signal: receiver dropped.");
+            }
+        } else {
+            println!("[Broker] Shutdown already initiated.");
+        }
+
+        // Shutdown Raft server
+        if let Some(tx) = self.raft_shutdown_tx.lock().await.take() {
+            println!("[Raft] Sending shutdown signal to Raft server...");
+            let _ = tx.send(());
+        }
+
+        // Wait for all outstanding operations to complete.
+        // This is a placeholder for more sophisticated shutdown logic.
         Ok(())
     }
 
