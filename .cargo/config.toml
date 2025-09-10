@@ -1,0 +1,5 @@
+[env]
+PATH = "/opt/homebrew/opt/protobuf@21/bin:$PATH"
+LDFLAGS = "-L/opt/homebrew/opt/protobuf@21/lib"
+CPPFLAGS = "-I/opt/homebrew/opt/protobuf@21/include"
+PROTOC = "/opt/homebrew/opt/protobuf@21/bin/protoc"

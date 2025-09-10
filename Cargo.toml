@@ -7,13 +7,6 @@ edition = "2021"
 name = "bifrost"
 path = "src/lib.rs"
 
-[[example]]
-name = "consumer"
-path = "examples/consumer.rs"
-
-[[example]]
-name = "client"
-path = "examples/client.rs"
 
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
@@ -42,10 +35,14 @@ varuint = "0.7.1"
 bifrost-protocol-macro = { path = "bifrost-protocol-macro" }
 tonic = "0.11.0"
 prost = "0.12.6"
-openraft = "0.9.4"
+raft = "0.7.0"
+protobuf = "2.28.0"
+slog = "2.7.0"
 
 [dev-dependencies]
 tempfile = "3.10.1"
+tokio-test = "0.4"
+criterion = "0.5"
 
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }
