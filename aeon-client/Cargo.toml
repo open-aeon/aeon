@@ -1,12 +1,12 @@
 [package]
-name = "bifrost-client"
+name = "aeon-client"
 version = "0.1.0"
 edition = "2021"
-description = "Bifrost message queue client library"
+description = "Aeon message queue client library"
 
 [dependencies]
-bifrost = { path = ".." }
-tokio = { version = "1.36", features = ["full"] }
+aeon = { path = ".." }
+tokio = { version = "1.0", features = ["full"] }
 futures = "0.3"
 anyhow = "1.0"
 async-trait = "0.1"

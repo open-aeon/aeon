@@ -8,4 +8,4 @@ pub mod server;
 pub mod storage;
 pub mod utils;
 
-pub use bifrost_protocol_macro;
+pub use aeon_protocol_macro;

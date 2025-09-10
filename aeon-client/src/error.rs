@@ -1,4 +1,4 @@
-use bifrost::kafka::ErrorResponse;
+use aeon::kafka::ErrorResponse;
 use thiserror::Error;
 
 #[derive(Error, Debug)]

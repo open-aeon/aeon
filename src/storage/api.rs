@@ -10,7 +10,7 @@ use bytes::Bytes;
 /// the upper layers (e.g., the Broker) to provide validated data and necessary metadata
 /// like the number of records in a batch.
 ///
-/// Any struct that implements this trait can be used as the underlying storage engine for Bifrost.
+/// Any struct that implements this trait can be used as the underlying storage engine for Aeon.
 /// This design allows us to easily switch or add new storage implementations in the future
 /// without modifying the upper business logic code.
 ///

@@ -10,7 +10,7 @@ pub use storage::StorageError;
 pub use protocol::ProtocolError;
 
 #[derive(Error, Debug)]
-pub enum BifrostError {
+pub enum AeonError {
     #[error("服务器错误: {0}")]
     Server(#[from] ServerError),
     
@@ -30,4 +30,4 @@ pub enum BifrostError {
     Other(String),
 }
 
-pub type Result<T> = std::result::Result<T, BifrostError>; 
+pub type Result<T> = std::result::Result<T, AeonError>; 

@@ -28,7 +28,7 @@ impl Server {
 
     pub async fn start(&self, listener: TcpListener) -> Result<()> {
         println!(
-            "Bifrost server started, listening on {}:{}",
+            "aeon server started, listening on {}:{}",
             self.config.host, self.config.port
         );
 

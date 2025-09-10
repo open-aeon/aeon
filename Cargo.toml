@@ -1,10 +1,10 @@
 [package]
-name = "bifrost"
+name = "aeon"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "bifrost"
+name = "aeon"
 path = "src/lib.rs"
 
 [[example]]
@@ -39,7 +39,7 @@ crc = "3.0.0"
 crc32fast = "1.3"
 flate2 = "1.0"
 varuint = "0.7.1"
-bifrost-protocol-macro = { path = "bifrost-protocol-macro" }
+aeon-protocol-macro = { path = "aeon-protocol-macro" }
 
 [dev-dependencies]
 tempfile = "3.10.1"

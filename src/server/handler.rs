@@ -209,7 +209,7 @@ async fn handle_metadata(req: &MetadataRequest, broker: &Broker) -> Result<Respo
         }],
         controller_id: 0, // Hardcoding controller ID for now
         topics: kafka_topics,
-        cluster_id: Some("bifrost-cluster".to_string()), // Assuming a fixed cluster_id
+        cluster_id: Some("aeon-cluster".to_string()), // Assuming a fixed cluster_id
         ..Default::default()
     };
     // println!("[DEBUG] Sending MetadataResponse: {:?}", response);
@@ -467,7 +467,7 @@ async fn handle_find_coordinator(req: &FindCoordinatorRequest, broker: &Broker, 
                     0
                 };
                 
-                // 在单节点Bifrost中，任何分区的Leader都是自己，所以直接返回自身信息
+                // 在单节点aeon中，任何分区的Leader都是自己，所以直接返回自身信息
                 coordinator.node_id = broker_meta.id as i32;
                 coordinator.host = broker_meta.host.clone();
                 coordinator.port = broker_meta.port as i32;
@@ -511,7 +511,7 @@ async fn handle_find_coordinator(req: &FindCoordinatorRequest, broker: &Broker, 
                 0
             };
 
-            // 在单节点Bifrost中，任何分区的Leader都是自己
+            // 在单节点aeon中，任何分区的Leader都是自己
             response_node_id = broker_meta.id as i32;
             response_host = broker_meta.host.clone();
             response_port = broker_meta.port as i32;
@@ -542,7 +542,7 @@ async fn handle_join_group(req: &JoinGroupRequest, broker: &Broker) -> Result<Re
     // v4+ 两步 Join：若 member_id 为空，先返回 MEMBER_ID_REQUIRED 并下发分配的 member_id
     if req.member_id.is_empty() {
         // 79 = MEMBER_ID_REQUIRED（Kafka 标准错误码）
-        let assigned = format!("bifrost-{}", uuid::Uuid::new_v4());
+        let assigned = format!("aeon-{}", uuid::Uuid::new_v4());
         let resp = JoinGroupResponse {
             throttle_time_ms: 0,
             error_code: 79,

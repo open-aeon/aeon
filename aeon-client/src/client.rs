@@ -6,9 +6,9 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use rand::seq::SliceRandom;
 
-use bifrost::kafka::{Request, Response, MetadataRequest};
-use bifrost::kafka::codec::ClientCodec;
-use bifrost::common::metadata::TopicMetadata;
+use aeon::kafka::{Request, Response, MetadataRequest};
+use aeon::kafka::codec::ClientCodec;
+use aeon::common::metadata::TopicMetadata;
 use crate::error::ClientError;
 
 pub type Connection = Framed<TcpStream, ClientCodec>;

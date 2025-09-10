@@ -104,7 +104,7 @@ fn collect_specs_recursively(
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/kafka/schemas/");
-    println!("cargo:rerun-if-changed=bifrost-protocol-macro/src/lib.rs");
+    println!("cargo:rerun-if-changed=aeon-protocol-macro/src/lib.rs");
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("kafka_protocol.rs");
@@ -176,7 +176,7 @@ fn main() {
 
         let struct_code = format!(
             "
-{struct_attrs}#[derive(crate::bifrost_protocol_macro::KafkaProtocol, Debug, Default, Clone, PartialEq)]
+{struct_attrs}#[derive(crate::aeon_protocol_macro::KafkaProtocol, Debug, Default, Clone, PartialEq)]
 pub struct {name} {{
 {fields}
 }}
