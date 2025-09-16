@@ -299,11 +299,18 @@ impl LogSegment {
             Ok(index) => index,
             Err(index) => {
                 if index == 0 {
-                    return Ok(vec![]);
+                    // 如果请求的 offset 比索引中的第一个还要小，我们从索引的第一项开始线性扫描
+                    0
+                } else {
+                    index - 1
                 }
-                index - 1
             },
         };
+        
+        // 如果索引为空，说明 segment 里没有任何数据
+        if self.index.is_empty() {
+            return Ok(vec![]);
+        }
 
         let (_, mut current_pos) = self.index[start_index];
         let mut result = Vec::new();
@@ -320,6 +327,11 @@ impl LogSegment {
             let batch_len_bytes: [u8; 4] = self.mmap[pos + 8..pos + 12].try_into().map_err(|_| StorageError::DataCorruption)?;
             let batch_len = u32::from_be_bytes(batch_len_bytes) as usize;
 
+            if batch_len == 0 {
+                // Invalid batch length, stop reading to prevent infinite loop
+                break;
+            }
+
             let batch_end = pos + 12 + batch_len;
             if batch_end > self.position {
                 break;
@@ -331,6 +343,7 @@ impl LogSegment {
             let last_delta_bytes: [u8; 4] = self.mmap[pos + 23..pos + 27].try_into().map_err(|_| StorageError::DataCorruption)?;
             let last_delta = u32::from_be_bytes(last_delta_bytes) as u64;
             let batch_last = batch_base + last_delta;
+
             if start_offset > batch_last {
                 current_pos += (12 + batch_len) as u32;
                 continue;

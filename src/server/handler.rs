@@ -6,8 +6,6 @@ use crate::error::protocol::ProtocolError;
 use crate::error::storage::StorageError;
 use crate::common::metadata::TopicPartition;
 use crate::kafka::protocol::*;
-use crate::kafka::message::RecordBatch;
-use crate::kafka::codec::Decode;
 use crate::kafka::{Request, RequestType, Response, ResponseHeader, ResponseType};
 use crate::utils::hash::calculate_hash;
 
@@ -200,11 +198,14 @@ async fn handle_metadata(req: &MetadataRequest, broker: &Broker) -> Result<Respo
         }
     }).collect();
 
+    let b_meta = broker.metadata();
+
     let response = MetadataResponse {
         brokers: vec![MetadataResponseBroker {
             node_id: 0,
-            host: "localhost".to_string(),
-            port: 8080,
+            host: b_meta.host.clone(),
+            port: b_meta.port as i32,
+            rack: None,
             ..Default::default()
         }],
         controller_id: 0, // Hardcoding controller ID for now
@@ -316,23 +317,21 @@ async fn handle_fetch(req: &FetchRequest, broker: &Broker) -> Result<ResponseTyp
                 req.max_bytes.max(0) as usize
             };
 
+            let high_watermark = broker.latest_offset(&tp).await.unwrap_or(0) as i64;
+
             match broker.read_batch(&tp, start_offset, max_bytes).await {
                 Ok(batches) => {
                     if batches.is_empty() {
                         partition_responses.push(PartitionData{
                             partition_index: p.partition,
                             error_code: 0,
-                            high_watermark: p.fetch_offset,
-                            last_stable_offset: p.fetch_offset,
+                            high_watermark,
+                            last_stable_offset: high_watermark,
                             log_start_offset: 0,
                             records: Some(bytes::Bytes::new()),
                             ..Default::default()
                         });
                     } else {
-                        let mut last_batch_bytes = batches.last().unwrap().clone();
-                        let record_batch = RecordBatch::decode(&mut last_batch_bytes, 0)?;
-                        let next_offset = record_batch.base_offset + record_batch.last_offset_delta as i64 + 1;
-
                         let mut buf = BytesMut::new();
                         for b in batches {
                             buf.extend_from_slice(&b);
@@ -342,8 +341,8 @@ async fn handle_fetch(req: &FetchRequest, broker: &Broker) -> Result<ResponseTyp
                         partition_responses.push(PartitionData {
                             partition_index: p.partition,
                             error_code: 0,
-                            high_watermark: next_offset,
-                            last_stable_offset: next_offset,
+                            high_watermark,
+                            last_stable_offset: high_watermark,
                             log_start_offset: 0,
                             records: Some(records_bytes),
                             ..Default::default()
