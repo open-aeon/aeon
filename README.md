@@ -6,26 +6,27 @@ Aeon is a high-performance, Kafka-protocol compatible message queue built from s
 
 **This project is currently at `v0.1.0`, focusing on a complete, single-node core engine.**
 
-## 🌟 v0.1.0 Highlights & Features
+## 🌟 Highlights & Features
 
-The `v0.1.0` release delivers a robust, single-node message broker with a focus on protocol correctness, storage efficiency, and a complete consumer group implementation.
+The `v0.1.0` release delivers a robust, single-node message broker with a focus on deep engineering solutions and protocol correctness.
 
-*   **🚀 Kafka Protocol Compatibility**: Fully compatible with the Kafka protocol, allowing the use of standard Kafka clients (`rdkafka`, Java clients, etc.) for producing and consuming messages.
-    *   Implemented via a `build.rs` script that parses Kafka's official JSON protocol specifications to automatically generate Rust structs and serialization/deserialization logic. This ensures correctness and easy upgrades.
+*   **🚀 Kafka Protocol Compatibility via Automated Code Generation**:
+    *   Instead of error-prone manual implementation, the entire Kafka protocol layer is **automatically generated**.
+    *   A `build.rs` script parses Kafka's official JSON protocol specifications and uses procedural macros (`aeon-protocol-macro`) to generate all request/response structs, along with their version-aware serialization (`Encode`) and deserialization (`Decode`) logic.
 
-*   **💾 High-Performance Log Storage Engine**:
-    *   Built with memory-mapped files (`mmap`) for zero-copy reads and high-throughput writes.
-    *   Features a segmented log design, where each partition is composed of multiple segment files.
-    *   Implements a sparse in-memory index for each segment, allowing for fast offset lookups without loading the entire index into memory.
 
-*   **🔄 Complete Consumer Group Implementation**:
-    *   Features a fully functional Group Coordinator on the broker side to manage consumer groups.
-    *   Supports dynamic partition rebalancing as consumers join or leave the group.
-    *   Handles the complete Kafka consumer group protocol suite (`FindCoordinator`, `JoinGroup`, `SyncGroup`, `Heartbeat`, `OffsetCommit/Fetch`).
+*   **🔄 Complete Consumer Group & Rebalancing Implementation**:
+    *   Features a fully functional **Group Coordinator**, implemented as a separate asynchronous Actor, to manage the entire consumer lifecycle. This is often the most complex part of a message broker.
+    *   Correctly handles the complete Kafka consumer group protocol suite: `FindCoordinator`, `JoinGroup`, `SyncGroup`, `Heartbeat`, and `OffsetCommit/Fetch`.
+    *   Supports dynamic partition rebalancing as consumers join or leave a group, ensuring no messages are lost and consumption is balanced.
 
-*   **⚙️ Asynchronous Architecture**:
-    *   Built entirely on `tokio`, leveraging Rust's async/await for high concurrency and efficient I/O handling.
-    *   Each consumer group is managed by a dedicated asynchronous task (Actor model), ensuring isolation and scalability.
+*   **💾 High-Performance I/O & Storage Engine**:
+    *   The storage engine is built on **memory-mapped files (`mmap`)** to achieve high-throughput writes and **zero-copy reads**, minimizing kernel/user-space context switching.
+    *   Implements a **segmented log** design coupled with a **sparse in-memory index**, allowing for efficient offset lookups without consuming large amounts of memory.
+
+*   **✅ End-to-End Tested with Standard Clients**:
+    *   The broker's correctness and compatibility are validated by a comprehensive integration test suite.
+    *   The test suite uses the standard `rdkafka` (librdkafka) Rust client to perform a full produce/consume cycle, proving that Aeon works seamlessly with the existing Kafka ecosystem.
 
 ## 🏛️ Architecture (v0.1.0)
 
@@ -60,10 +61,23 @@ Currently, the primary way to run and interact with Aeon is through the integrat
 
 ## 🗺️ Roadmap
 
-*   **v0.1.0**: Single-Node Core (✅)
-*   **v0.2.0**: Persistence & Recovery (WIP)
-    *   Snapshotting coordinator state.
-    *   Robust crash recovery for the storage engine.
-*   **v0.3.0**: Distributed Capabilities
-    *   Implementation of a Raft consensus algorithm for metadata management.
-    *   Multi-broker cluster support.
+The future of Aeon is focused on evolving from a single-node broker into a fully-featured, distributed, and cloud-native messaging platform.
+
+*   **v0.1.0**: Single-Node Core (✅ Completed)
+
+*   **v0.2.0**: Feature Completeness & Performance Validation
+    *   Implement full Kafka feature compatibility, including topic management, timestamps, and transactions.
+    *   Conduct comprehensive performance benchmarking and tuning to establish a performance baseline.
+
+*   **v0.3.0**: Distributed Architecture
+    *   Evolve Aeon into a high-availability, multi-broker distributed cluster using a pure Raft-based architecture for metadata management.
+
+*   **v0.4.0**: Enterprise-Grade Features
+    *   **Security**: Implement TLS for encrypted transport.
+    *   **Monitoring**: Add Prometheus metrics for deep observability.
+    *   **Management**: Implement advanced management APIs like `DescribeCluster`, `DescribeConfigs`, and `AlterConfigs`.
+
+*   **Future Exploration**:
+    *   **Linux-Optimized I/O**: Explore cutting-edge technologies like `io_uring` and `kTLS` for superior performance in Linux environments.
+    *   **Cloud-Native Features**: Introduce tiered storage for cost-effective long-term data retention.
+    *   **Extensibility**: Add WASM (WebAssembly) support to enable simplified, in-broker stream processing.
