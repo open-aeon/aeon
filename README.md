@@ -49,7 +49,7 @@ Currently, the primary way to run and interact with Aeon is through the integrat
 
 1.  **Clone the repository**:
     ```bash
-    git clone https://github.com/your-username/aeon.git
+    git clone https://github.com/open-aeon/aeon.git
     cd aeon
     ```
 
