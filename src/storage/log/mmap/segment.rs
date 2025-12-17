@@ -264,7 +264,7 @@ impl LogSegment {
         let physical_position = self.position as u32;
         // 先将整批数据拷贝到 mmap
         let dst_range = self.position..self.position + total_len;
-        self.mmap[dst_range.clone()].copy_from_slice(&data);
+        self.mmap[dst_range].copy_from_slice(&data);
         // 再覆盖前 8 字节为分配后的 base_offset（不影响 CRC 覆盖范围）
         let base_be = assigned_base_offset.to_be_bytes();
         if total_len < 8 { return Err(StorageError::DataCorruption); }
@@ -375,7 +375,7 @@ impl LogSegment {
         let rel_offset = (offset - base_offset) as u32;
 
         // 二分查找index，找到第一个大于等于rel_offset的位置
-        let idx = match self.index.binary_search_by_key(&rel_offset, |&(base, _)| ((base - base_offset) as u32)) {
+        let idx = match self.index.binary_search_by_key(&rel_offset, |&(base, _)| (base - base_offset) as u32) {
             Ok(i) => i, // 精确命中
             Err(i) => i, // 没有精确命中，i为第一个大于rel_offset的位置
         };
