@@ -176,8 +176,8 @@ fn main() {
 
         let struct_code = format!(
             "
-{struct_attrs}#[derive(crate::aeon_protocol_macro::KafkaProtocol, Debug, Default, Clone, PartialEq)]
-pub struct {name} {{
+#[derive(crate::aeon_protocol_macro::KafkaProtocol, Debug, Default, Clone, PartialEq)]
+{struct_attrs}pub struct {name} {{
 {fields}
 }}
 ",
