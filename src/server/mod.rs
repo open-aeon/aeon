@@ -32,11 +32,14 @@ impl Server {
             self.config.host, self.config.port
         );
 
+        let ctrl_c_signal = signal::ctrl_c();
+        tokio::pin!(ctrl_c_signal);
+
         loop {
             tokio::select! {
                 biased;
 
-                _ = signal::ctrl_c() => {
+                _ = &mut ctrl_c_signal => {
                     println!("\n[Server] Ctrl-C received. Initiating graceful shutdown...");
                     self.broker.initiate_shutdown().await;
                     break;
@@ -56,7 +59,7 @@ impl Server {
                     tokio::spawn(async move {
                         println!("[Connection] New connection from: {}", addr);
                         if let Err(e) = Self::handle_connection(socket, addr, broker).await {
-                            eprintln!("[Connection] Connection from {} error: {}", addr, e);
+                            println!("[Connection] Connection from {} error: {}", addr, e);
                         }
                     });
                 }

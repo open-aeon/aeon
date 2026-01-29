@@ -18,7 +18,6 @@ impl Decoder for ServerCodec {
     type Error = std::io::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        // 打印收到的原始字节内容，便于调试
         // println!("[DEBUG]收到原始字节: {:?}", &src[..]);
         if src.len() < 4 {
             return Ok(None);
@@ -45,8 +44,8 @@ impl Decoder for ServerCodec {
 
         let api_version = header.api_version;
 
-        println!("[DEBUG]Decoded header: api_key={}, api_version={}, correlation_id={}, client_id={:?}", 
-                 header.api_key, header.api_version, header.correlation_id, header.client_id);
+        // println!("[DEBUG]Decoded header: api_key={}, api_version={}, correlation_id={}, client_id={:?}", 
+        //          header.api_key, header.api_version, header.correlation_id, header.client_id);
 
         let request_type = match header.api_key {
             0 => ProduceRequest::decode(&mut cursor, api_version).map(RequestType::Produce),
@@ -62,7 +61,7 @@ impl Decoder for ServerCodec {
             _ => return Err(err_convert(ProtocolError::UnknownApiKey(header.api_key))),
         }.map_err(err_convert)?;
 
-        println!("[DEBUG]Successfully decoded request type: {:?}", request_type);
+        // println!("[DEBUG]Successfully decoded request type: {:?}", request_type);
 
         Ok(Some(Request { header, request_type }))
     }

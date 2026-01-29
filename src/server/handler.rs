@@ -1,5 +1,6 @@
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use log::debug;
 
 use crate::broker::Broker;
 use crate::error::protocol::ProtocolError;
@@ -8,6 +9,7 @@ use crate::common::metadata::TopicPartition;
 use crate::kafka::protocol::*;
 use crate::kafka::{Request, RequestType, Response, ResponseHeader, ResponseType};
 use crate::utils::hash::calculate_hash;
+use crate::error::consumer::ConsumerGroupError;
 
 // todo: broker是否可以换为&Arc<Broker>
 pub async fn handle_request(request: Request, broker: &Broker) -> Result<Response> {
@@ -585,8 +587,12 @@ async fn handle_join_group(req: &JoinGroupRequest, broker: &Broker) -> Result<Re
         supported_protocols,
     };
 
-    let result = broker.join_group(join_req).await?;
+    let result = broker.join_group(join_req).await;
+    if let Err(e) = &result {
+       println!("Failed to join group: {}", e);
+    }
 
+    let result = result.unwrap();
     // 5) 构造响应（按版本，过程宏会处理可用字段）
     let members: Vec<JoinGroupResponseMember> = result
         .members
@@ -611,7 +617,7 @@ async fn handle_join_group(req: &JoinGroupRequest, broker: &Broker) -> Result<Re
         members,
         ..Default::default()
     };
-    println!("[DEBUG] JoinGroupResponse: {:?}", response);
+    // println!("[DEBUG] JoinGroupResponse: {:?}", response);
 
     Ok(ResponseType::JoinGroup(response))
 }
@@ -619,7 +625,6 @@ async fn handle_join_group(req: &JoinGroupRequest, broker: &Broker) -> Result<Re
 async fn handle_sync_group(req: &SyncGroupRequest, broker: &Broker) -> Result<ResponseType> {
     use crate::broker::coordinator as coord;
 
-    // 1) 解析 leader 的 assignment（只有 leader 会携带，其他成员为空）
     fn decode_member_assignment(raw: &Bytes) -> anyhow::Result<Vec<(String, Vec<u32>)>> {
         let mut buf = raw.clone();
 
@@ -693,26 +698,39 @@ async fn handle_sync_group(req: &SyncGroupRequest, broker: &Broker) -> Result<Re
         assignment_map.insert(a.member_id.clone(), parsed);
     }
 
-    // 2) 调用协调器，获取该成员的最终分配
+
     let result = broker.sync_group(coord::SyncGroupRequest {
         group_id: req.group_id.clone(),
         member_id: req.member_id.clone(),
         generation_id: req.generation_id as u32,
         assignment: assignment_map,
-    }).await?;
+    }).await;
 
-    // 3) 将该成员的 assignment 编码回标准的 MemberAssignment bytes
-    let encoded = encode_member_assignment(&result.assignment);
+    let (error_code, assignment) = match result {
+        Ok(r) => (0i16, encode_member_assignment(&r.assignment)),
+        Err(e) => {
+            let code = if let Some(cge) = e.downcast_ref::<ConsumerGroupError>() {
+                match cge {
+                    ConsumerGroupError::RebalanceInProgress => 27,
+                    _ => 33,
+                }
+            } else {
+                33
+            };
+            (code, encode_member_assignment(&[]))
+        }
+    };
+
 
     let response = SyncGroupResponse {
         throttle_time_ms: 0,
-        error_code: 0,
+        error_code,
         protocol_type: req.protocol_type.clone(),
         protocol_name: req.protocol_name.clone(),
-        assignment: encoded,
+        assignment,
         ..Default::default()
     };
-    println!("[DEBUG] SyncGroupResponse: {:?}", response);
+    debug!("SyncGroupResponse: {:?}", response);
     Ok(ResponseType::SyncGroup(response))
 }
 
@@ -764,7 +782,7 @@ async fn handle_offset_fetch(req: &OffsetFetchRequest, broker: &Broker) -> Resul
             throttle_time_ms: 0,
             ..Default::default()
         };
-        println!("[DEBUG]OffsetFetchResponse: {:?}", response);
+        debug!("OffsetFetchResponse: {:?}", response);
         return Ok(ResponseType::OffsetFetch(response));
     }
 

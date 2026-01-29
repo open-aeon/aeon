@@ -1,6 +1,7 @@
 use std::{collections::{HashMap}, time::{Duration, Instant}};
 use anyhow::Result;
 use tokio::sync::oneshot;
+use log::{info, debug};
 
 use crate::common::metadata::TopicPartition;
 use crate::error::consumer::ConsumerGroupError;
@@ -134,7 +135,9 @@ impl ConsumerGroup {
                 return;
             }
         }
+        info!("[ConsumerGroup] Adding member '{}' to group '{}'.", member.id, self.name);
         self.members.insert(member.id.clone(), member);
+        debug!("[ConsumerGroup] Members: {:?}", self.members);
     }
 
     pub fn remove_member(&mut self, member_id: &str) -> Option<ConsumerMember> {

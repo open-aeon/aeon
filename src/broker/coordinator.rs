@@ -141,21 +141,27 @@ impl GroupCoordinator {
                 Some(command) = self.command_rx.recv() => {
                     match command {
                         CoordinatorCommand::JoinGroup { request, response_tx } => {
+                            println!("[Coordinator] Received JoinGroup command: JoinGroup");
                             self.handle_join_group(request, response_tx);
                         }
                         CoordinatorCommand::LeaveGroup { request, response_tx } => {
+                            println!("[Coordinator] Received LeaveGroup command: LeaveGroup");
                             self.handle_leave_group(request, response_tx);
                         }
                         CoordinatorCommand::Heartbeat { request, response_tx } => {
+                            println!("[Coordinator] Received Heartbeat command: Heartbeat");
                             self.handle_heartbeat(request, response_tx);
                         }
                         CoordinatorCommand::CommitOffset { request } => {
+                            println!("[Coordinator] Received CommitOffset command: CommitOffset");
                             self.handle_commit_offset(request);
                         }
                         CoordinatorCommand::FetchOffset { request, response_tx } => {
+                            println!("[Coordinator] Received FetchOffset command: FetchOffset");
                             self.handle_fetch_offset(request, response_tx);
                         }
                         CoordinatorCommand::SyncGroup { request, response_tx } => {
+                            println!("[Coordinator] Received SyncGroup command: SyncGroup");
                             if self.handle_sync_group(request, response_tx) {
                                 self.on_sync_complete();
                             }
@@ -169,10 +175,12 @@ impl GroupCoordinator {
                         None => pending::<()>().await,
                     }
                  } => {
+                    println!("[Coordinator] Rebalance timer ticked");
                     self.on_rebalance_timeout().await;
                 }
 
                 _ = heartbeat_check_timer.tick() => {
+                    println!("[Coordinator] Heartbeat check timer ticked");
                     self.check_session_timeouts();
                 }
 
@@ -182,10 +190,12 @@ impl GroupCoordinator {
                 }
             }
         }
+        
+        println!("[Debug] Coordinator stopped for group '{}'.", self.group.name);
     }
 
     fn handle_join_group(&mut self, request: JoinGroupRequest, response_tx: oneshot::Sender<Result<JoinGroupResult, ConsumerGroupError>>) {
-        let member_id = request.member_id.clone();
+        let member_id = request.member_id;
         let member = ConsumerMember {
             id: member_id.clone(),
             group_instance_id: request.group_instance_id.clone(),
@@ -196,6 +206,8 @@ impl GroupCoordinator {
             last_heartbeat: Instant::now(),
             assignment: vec![],
         };
+        println!("[Coordinator] Member '{}' joined group '{}'.", member_id, self.group.name);
+        println!("[Coordinator] Group state: {:?}", self.group.state);
         // 若尚未进入 PreparingRebalance，则初始化预期集合（优先使用静态成员 instanceId，否则用 memberId）
         if self.group.state != GroupState::PreparingRebalance {
             let prev_static: HashSet<String> = self.group.get_members().values()
@@ -211,6 +223,7 @@ impl GroupCoordinator {
             }
             self.pending_arrived_ids.clear();
             self.group.transition_to(GroupState::PreparingRebalance);
+            println!("[Coordinator] Group transitioned to {:?}.", self.group.state);
         }
 
         self.group.add_member(member);
@@ -347,7 +360,7 @@ impl GroupCoordinator {
     }
 
     fn trigger_rebalance_if_needed(&mut self) {
-        if self.group.state == GroupState::CompletingRebalance && self.rebalance_timer.is_none() {
+        if self.group.state != GroupState::PreparingRebalance && self.rebalance_timer.is_none() {
             self.fail_all_pending_responders(ConsumerGroupError::RebalanceInProgress);
 
             let timeout = Duration::from_millis(3000);
