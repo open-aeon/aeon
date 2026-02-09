@@ -71,7 +71,6 @@ fn map_type(field: &FieldSpec, defined_structs: &HashSet<String>) -> String {
     };
 
     if is_nullable {
-        // 改动点: 对于标准类型，可空性总是由 Option<T> 处理。
         base_type = format!("Option<{}>", base_type);
     }
     
@@ -189,4 +188,34 @@ fn main() {
     }
 
     f.write_all(all_code.as_bytes()).unwrap();
+
+    // write_errors_file(&out_dir);
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ErrorSpec {
+    name: String,
+    code: i16,
+    message: String,
+    retriable: bool,
+    fatal: bool,
+}
+
+fn write_errors_file(out_dir: &str) {
+    let dest_path = Path::new(out_dir).join("kafka_errors.rs");
+    let mut f = File::create(&dest_path).unwrap();
+
+    let errors: Vec<ErrorSpec> = serde_json::from_str(&fs::read_to_string("src/kafka/schemas/errors.json").unwrap()).unwrap_or_else(|e| {
+        panic!("Failed to parse JSON from errors.json: {}", e);
+    });
+
+    for error in errors {
+        f.write_all(format!("pub struct {}: Error {{
+            code: {},
+            message: {},
+            retriable: {},
+            fatal: {},
+        }}", error.name, error.code, error.message, error.retriable, error.fatal).as_bytes()).unwrap();
+    }
 }

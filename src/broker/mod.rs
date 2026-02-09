@@ -1,8 +1,3 @@
-pub mod partition;
-pub mod topic;
-pub mod consumer_group;
-pub mod coordinator;
-
 use anyhow::{Context, Result};
 use tokio::sync::watch;
 use dashmap::DashMap;
@@ -12,13 +7,15 @@ use tokio::sync::{RwLock, Mutex, mpsc, oneshot};
 use bytes::Bytes;
 use chrono::Utc;
 
-use crate::broker::coordinator::*;
-use crate::broker::consumer_group::*;
+pub mod topic;
+pub mod partition;
+
+use crate::coordinator::*;
 use crate::broker::topic::Topic;
 use crate::common::metadata::{TopicMetadata, TopicPartition};
 use crate::config::broker::BrokerConfig;
 use crate::config::storage::StorageConfig;
-use crate::broker::consumer_group::ConsumerGroup;
+use crate::coordinator::ConsumerGroup;
 use crate::common::metadata::OffsetCommitMetadata;
 use crate::kafka::codec::Decode;
 use crate::kafka::message::Record;
