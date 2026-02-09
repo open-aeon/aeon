@@ -7,7 +7,63 @@ use futures::future::pending;
 
 use crate::common::metadata::TopicPartition;
 use crate::error::consumer::ConsumerGroupError;
-use crate::broker::consumer_group::{ConsumerGroup, ConsumerMember, GroupState, JoinGroupResult, LeaveGroupResult, HeartbeatResult, SyncGroupResult};
+
+pub mod group;
+pub mod state;
+pub mod member;
+
+pub use group::ConsumerGroup;
+pub use member::ConsumerMember;
+pub use state::GroupState;
+
+#[derive(Clone, Debug)]
+pub struct JoinGroupResult {
+    pub generation_id: u32,
+    pub member_id: String,
+    pub members: Vec<MemberInfo>,
+    pub protocol: Option<String>,
+    pub leader_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct MemberInfo {
+    pub id: String,
+    pub metadata: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub struct LeaveGroupResult {}
+
+#[derive(Debug)]
+pub struct HeartbeatResult {}
+
+#[derive(Debug)]
+pub struct CommitOffsetResponse {
+    pub results: Vec<TopicPartitionResult>,
+}
+
+#[derive(Debug)]
+pub struct TopicPartitionResult {
+    pub topic: String,
+    pub partition: u32,
+}
+
+#[derive(Debug)]
+pub struct FetchOffsetResponse {
+    pub results: Vec<TopicPartitionOffsetResult>,
+}
+
+#[derive(Debug)]
+pub struct TopicPartitionOffsetResult {
+    pub topic: String,
+    pub partition: u32,
+    pub offset: i64,
+}
+
+#[derive(Debug)]
+pub struct SyncGroupResult {
+    pub assignment: Vec<(String, Vec<u32>)>,
+}
 
 pub struct JoinGroupRequest {
     pub group_id: String,
@@ -141,27 +197,21 @@ impl GroupCoordinator {
                 Some(command) = self.command_rx.recv() => {
                     match command {
                         CoordinatorCommand::JoinGroup { request, response_tx } => {
-                            println!("[Coordinator] Received JoinGroup command: JoinGroup");
                             self.handle_join_group(request, response_tx);
                         }
                         CoordinatorCommand::LeaveGroup { request, response_tx } => {
-                            println!("[Coordinator] Received LeaveGroup command: LeaveGroup");
                             self.handle_leave_group(request, response_tx);
                         }
                         CoordinatorCommand::Heartbeat { request, response_tx } => {
-                            println!("[Coordinator] Received Heartbeat command: Heartbeat");
                             self.handle_heartbeat(request, response_tx);
                         }
                         CoordinatorCommand::CommitOffset { request } => {
-                            println!("[Coordinator] Received CommitOffset command: CommitOffset");
                             self.handle_commit_offset(request);
                         }
                         CoordinatorCommand::FetchOffset { request, response_tx } => {
-                            println!("[Coordinator] Received FetchOffset command: FetchOffset");
                             self.handle_fetch_offset(request, response_tx);
                         }
                         CoordinatorCommand::SyncGroup { request, response_tx } => {
-                            println!("[Coordinator] Received SyncGroup command: SyncGroup");
                             if self.handle_sync_group(request, response_tx) {
                                 self.on_sync_complete();
                             }
@@ -175,12 +225,10 @@ impl GroupCoordinator {
                         None => pending::<()>().await,
                     }
                  } => {
-                    println!("[Coordinator] Rebalance timer ticked");
                     self.on_rebalance_timeout().await;
                 }
 
                 _ = heartbeat_check_timer.tick() => {
-                    println!("[Coordinator] Heartbeat check timer ticked");
                     self.check_session_timeouts();
                 }
 
@@ -191,7 +239,6 @@ impl GroupCoordinator {
             }
         }
         
-        println!("[Debug] Coordinator stopped for group '{}'.", self.group.name);
     }
 
     fn handle_join_group(&mut self, request: JoinGroupRequest, response_tx: oneshot::Sender<Result<JoinGroupResult, ConsumerGroupError>>) {
@@ -206,9 +253,7 @@ impl GroupCoordinator {
             last_heartbeat: Instant::now(),
             assignment: vec![],
         };
-        println!("[Coordinator] Member '{}' joined group '{}'.", member_id, self.group.name);
-        println!("[Coordinator] Group state: {:?}", self.group.state);
-        // 若尚未进入 PreparingRebalance，则初始化预期集合（优先使用静态成员 instanceId，否则用 memberId）
+
         if self.group.state != GroupState::PreparingRebalance {
             let prev_static: HashSet<String> = self.group.get_members().values()
                 .filter_map(|m| m.group_instance_id.clone())
@@ -229,7 +274,6 @@ impl GroupCoordinator {
         self.group.add_member(member);
         self.pending_join_responders.insert(member_id.clone(), response_tx);
 
-        // 启动或缩短一个很小的去抖窗口（不超过客户端给的上限）
         let debounce = Duration::from_millis(200);
         let max_timeout = Duration::from_millis(request.rebalance_timeout);
         let timeout = if debounce < max_timeout { debounce } else { max_timeout };
@@ -238,19 +282,15 @@ impl GroupCoordinator {
             println!("[Coordinator] Group '{}' rebalance started. Timeout: {:?}", self.group.name, timeout);
         }
 
-        // 记录本次到达的标识
         let arrived_id = if self.expect_by_instance {
             request.group_instance_id.clone().unwrap_or_default()
         } else {
-            // 使用 pending_join_responders 中的键而非已移动的 member_id
-            // 此时 member_id 已被移动进 map，改用请求中的 id 字符串
             member_id.clone()
         };
         if !arrived_id.is_empty() {
             self.pending_arrived_ids.insert(arrived_id);
         }
 
-        // 预期集合已全部到达则提前完成
         if let Some(expected) = &self.expected_ids {
             if expected.is_subset(&self.pending_arrived_ids) {
                 self.rebalance_timer = Some(Box::pin(sleep(Duration::from_millis(0))));

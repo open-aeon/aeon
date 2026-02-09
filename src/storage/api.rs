@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-/// `LogStorage` is an abstract definition of our storage engine behavior.
+/// `LogStorage` is an abstract definition of Aeon's storage engine behavior.
 ///
 /// It operates on batches of records (`RecordBatch`) as opaque byte blocks,
 /// making it a "logically blind" component focused on efficient and reliable persistence.
@@ -11,11 +11,6 @@ use bytes::Bytes;
 /// like the number of records in a batch.
 ///
 /// Any struct that implements this trait can be used as the underlying storage engine for Aeon.
-/// This design allows us to easily switch or add new storage implementations in the future
-/// without modifying the upper business logic code.
-///
-/// The `Send + Sync` constraint is required because it allows storage engine instances
-/// to be safely shared in a multithreaded environment.
 #[async_trait]
 pub trait LogStorage: Send + Sync {
     /// Append a complete `RecordBatch` to the log.

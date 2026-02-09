@@ -28,6 +28,9 @@ pub async fn handle_request(request: Request, broker: &Broker) -> Result<Respons
         RequestType::JoinGroup(req) => handle_join_group(&req, broker).await?,
         RequestType::SyncGroup(req) => handle_sync_group(&req, broker).await?,
         RequestType::OffsetFetch(req) => handle_offset_fetch(&req, broker).await?,
+        RequestType::Heartbeat(req) => handle_heartbeat(&req, broker).await?,
+        RequestType::LeaveGroup(req) => handle_leave_group(&req, broker).await?,
+        RequestType::OffsetCommit(req) => handle_offset_commit(&req, broker).await?,
     };
 
     Ok(Response {
@@ -77,6 +80,9 @@ async fn handle_api_versions(_req: &ApiVersionsRequest, _broker: &Broker, api_ve
         ApiVersion { api_key: 11, min_version: 0, max_version: 9, ..Default::default() }, // JoinGroup
         ApiVersion { api_key: 14, min_version: 0, max_version: 5, ..Default::default() }, // SyncGroup
         ApiVersion { api_key: 18, min_version: 0, max_version: 3, ..Default::default() }, // ApiVersions
+        ApiVersion { api_key: 12, min_version: 0, max_version: 4, ..Default::default() }, // Heartbeat
+        ApiVersion { api_key: 13, min_version: 0, max_version: 5, ..Default::default() }, // LeaveGroup
+        ApiVersion { api_key: 8, min_version: 2, max_version: 10, ..Default::default() }, // OffsetCommit
     ];
     let response = if api_version >= 3 {
         ApiVersionsResponse {
@@ -538,7 +544,7 @@ async fn handle_find_coordinator(req: &FindCoordinatorRequest, broker: &Broker, 
 }
 
 async fn handle_join_group(req: &JoinGroupRequest, broker: &Broker) -> Result<ResponseType> {
-    use crate::broker::coordinator as coord;
+    use crate::coordinator as coord;
 
     // v4+ 两步 Join：若 member_id 为空，先返回 MEMBER_ID_REQUIRED 并下发分配的 member_id
     if req.member_id.is_empty() {
@@ -623,7 +629,7 @@ async fn handle_join_group(req: &JoinGroupRequest, broker: &Broker) -> Result<Re
 }
 
 async fn handle_sync_group(req: &SyncGroupRequest, broker: &Broker) -> Result<ResponseType> {
-    use crate::broker::coordinator as coord;
+    use crate::coordinator as coord;
 
     fn decode_member_assignment(raw: &Bytes) -> anyhow::Result<Vec<(String, Vec<u32>)>> {
         let mut buf = raw.clone();
@@ -749,7 +755,7 @@ async fn handle_offset_fetch(req: &OffsetFetchRequest, broker: &Broker) -> Resul
                         let mut partitions_resp: Vec<OffsetFetchResponsePartitions> = Vec::with_capacity(t.partition_indexes.len());
                         for &p in &t.partition_indexes {
                             let tp = TopicPartition { topic: topic_name.clone(), partition: p as u32 };
-                            let off = broker.fetch_offset(crate::broker::coordinator::FetchOffsetRequest { group_id: g.group_id.clone(), tp }).await.ok().flatten();
+                            let off = broker.fetch_offset(crate::coordinator::FetchOffsetRequest { group_id: g.group_id.clone(), tp }).await.ok().flatten();
                             partitions_resp.push(OffsetFetchResponsePartitions {
                                 partition_index: p,
                                 committed_offset: off.unwrap_or(-1),
@@ -793,7 +799,7 @@ async fn handle_offset_fetch(req: &OffsetFetchRequest, broker: &Broker) -> Resul
             let mut partitions_resp: Vec<OffsetFetchResponsePartition> = Vec::with_capacity(t.partition_indexes.len());
             for &p in &t.partition_indexes {
                 let tp = TopicPartition { topic: t.name.clone(), partition: p as u32 };
-                let off = broker.fetch_offset(crate::broker::coordinator::FetchOffsetRequest { group_id: req.group_id.clone(), tp }).await.ok().flatten();
+                let off = broker.fetch_offset(crate::coordinator::FetchOffsetRequest { group_id: req.group_id.clone(), tp }).await.ok().flatten();
                 partitions_resp.push(OffsetFetchResponsePartition {
                     partition_index: p,
                     committed_offset: off.unwrap_or(-1),
@@ -818,4 +824,16 @@ async fn handle_offset_fetch(req: &OffsetFetchRequest, broker: &Broker) -> Resul
         ..Default::default()
     };
     Ok(ResponseType::OffsetFetch(response))
+}
+
+async fn handle_heartbeat(req: &HeartbeatRequest, broker: &Broker) -> Result<ResponseType> {
+    todo!()
+}
+
+async fn handle_leave_group(req: &LeaveGroupRequest, broker: &Broker) -> Result<ResponseType> {
+    todo!()
+}
+
+async fn handle_offset_commit(req: &OffsetCommitRequest, broker: &Broker) -> Result<ResponseType> {
+    todo!()
 }
