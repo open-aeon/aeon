@@ -132,19 +132,48 @@ impl LogSegment {
         }
         index_file.seek(SeekFrom::End(0))?;
 
-        // 从索引中恢复最后一个 batch 的位置
-        if let Some(&(_, last_indexed_position)) = in_memory_index.last() {
+        if let Some(&(last_indexed_base, last_indexed_position)) = in_memory_index.last() {
             let pos = last_indexed_position as usize;
+            let mut should_rebuild_index_from_start = false;
+
             if pos + 12 > log_file_metadata.len() as usize {
-                position = pos
+                should_rebuild_index_from_start = true;
             } else {
-                // 读取 RecordBatch 长度（第 8-12 字节，4字节，小端序）
                 let batch_len_bytes: [u8; 4] = mmap[pos + 8..pos + 12].try_into().unwrap();
                 let batch_len = u32::from_be_bytes(batch_len_bytes) as usize;
-                // 总批大小 = 12 (base_offset + batch_length) + batch_len
-                position = pos + 12 + batch_len;
+                if batch_len == 0 || pos + 12 + batch_len > log_file_metadata.len() as usize {
+                    should_rebuild_index_from_start = true;
+                } else {
+                    // 校验索引条目与日志真实内容是否一致；不一致则重建索引。
+                    let base_bytes: [u8; 8] = mmap[pos..pos + 8].try_into().unwrap();
+                    let on_disk_base = u64::from_be_bytes(base_bytes);
+                    if on_disk_base != last_indexed_base {
+                        should_rebuild_index_from_start = true;
+                    } else {
+                        position = pos + 12 + batch_len;
+                        // RecordBatch.records_count 位于 [57..61]；解析失败时按 1 条记录兜底。
+                        let indexed_batch_records = if pos + 61 <= log_file_metadata.len() as usize {
+                            let rc_bytes: [u8; 4] = mmap[pos + 57..pos + 61].try_into().unwrap();
+                            let rc = i32::from_be_bytes(rc_bytes);
+                            if rc > 0 { rc as u64 } else { 1 }
+                        } else {
+                            1
+                        };
+                        record_count = last_indexed_base
+                            .saturating_sub(base_offset)
+                            .saturating_add(indexed_batch_records);
+                    }
+                }
             }
-            record_count = in_memory_index.len() as u64;
+
+            if should_rebuild_index_from_start {
+                in_memory_index.clear();
+                index_file.set_len(0)?;
+                index_file.seek(SeekFrom::Start(0))?;
+                position = 0;
+                record_count = 0;
+                bytes_since_last_index = 0;
+            }
         }
 
         // 扫描剩余的 RecordBatch，重建索引
@@ -167,6 +196,14 @@ impl LogSegment {
 
             bytes_since_last_index += batch_len;
             
+            let batch_records = if current_batch_physical_pos + 61 <= log_file_size as usize {
+                let rc_bytes: [u8; 4] = mmap[current_batch_physical_pos + 57..current_batch_physical_pos + 61].try_into().unwrap();
+                let rc = i32::from_be_bytes(rc_bytes);
+                if rc > 0 { rc as u64 } else { 1 }
+            } else {
+                1
+            };
+
             // 根据索引间隔决定是否创建索引条目
             if bytes_since_last_index >= index_interval_bytes || record_count == 0 {
                 // 读取该批 base_offset
@@ -180,7 +217,7 @@ impl LogSegment {
             }
 
             position += 12 + batch_len;
-            record_count += 1;
+            record_count += batch_records;
         }
 
         Ok(Self {

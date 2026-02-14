@@ -1,8 +1,10 @@
 use anyhow::Result;
+use std::collections::HashMap;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::debug;
 
 use crate::broker::Broker;
+use crate::coordinator::CommitOffsetTp;
 use crate::error::protocol::ProtocolError;
 use crate::error::storage::StorageError;
 use crate::common::metadata::TopicPartition;
@@ -827,13 +829,136 @@ async fn handle_offset_fetch(req: &OffsetFetchRequest, broker: &Broker) -> Resul
 }
 
 async fn handle_heartbeat(req: &HeartbeatRequest, broker: &Broker) -> Result<ResponseType> {
-    todo!()
+    use crate::coordinator as coord;
+
+    let result = broker.heartbeat(coord::HeartbeatRequest {
+        group_id: req.group_id.clone(),
+        generation_id: req.generation_id,
+        member_id: req.member_id.clone(),
+        group_instance_id: req.group_instance_id.clone(),
+    }).await;
+
+    let error_code = match result {
+        Ok(()) => 0,
+        Err(e) => match e {
+            ConsumerGroupError::CoordinatorLoadInProgress => 14,
+            ConsumerGroupError::CoordinatorNotAvailable => 15,
+            ConsumerGroupError::NotCoordinator => 16,
+            ConsumerGroupError::InvalidGeneration(_, _) => 22,
+            ConsumerGroupError::MemberNotFound(_) => 25,
+            ConsumerGroupError::RebalanceInProgress => 27,
+            ConsumerGroupError::GroupAuthorizationFailed => 30,
+            ConsumerGroupError::FencedInstanceId => 82,
+            _ => 33,
+        },
+    };
+
+
+    let response = HeartbeatResponse {
+        throttle_time_ms: 0,
+        error_code,
+        ..Default::default()
+    };
+    Ok(ResponseType::Heartbeat(response))
 }
 
 async fn handle_leave_group(req: &LeaveGroupRequest, broker: &Broker) -> Result<ResponseType> {
-    todo!()
+    use crate::coordinator as coord;
+
+    let result = broker.leave_group(coord::LeaveGroupRequest {
+        group_id: req.group_id.clone(),
+        member_id: req.member_id.clone(),
+    }).await;
+
+    let error_code = match result {
+        Ok(()) => 0,
+        Err(e) => match e {
+            ConsumerGroupError::CoordinatorLoadInProgress => 14,
+            ConsumerGroupError::CoordinatorNotAvailable => 15,
+            ConsumerGroupError::NotCoordinator => 16,
+            ConsumerGroupError::InvalidGeneration(_, _) => 22,
+            ConsumerGroupError::MemberNotFound(_) => 25,
+            ConsumerGroupError::RebalanceInProgress => 27,
+            ConsumerGroupError::GroupAuthorizationFailed => 30,
+            ConsumerGroupError::FencedInstanceId => 82,
+            _ => 33,
+        },
+    };
+
+    let response = LeaveGroupResponse {
+        error_code,
+        ..Default::default()
+    };
+    Ok(ResponseType::LeaveGroup(response))
 }
 
 async fn handle_offset_commit(req: &OffsetCommitRequest, broker: &Broker) -> Result<ResponseType> {
-    todo!()
+    use crate::coordinator as coord;
+
+    let mut tps: Vec<CommitOffsetTp> = Vec::new();
+    let group_id = req.group_id.clone();
+    for t in req.topics.iter() {
+        for p in t.partitions.iter() {
+            let partition  = p.partition_index as u32;
+            let offset = p.committed_offset;
+            tps.push(CommitOffsetTp{
+                topic: t.name.clone(),
+                partition,
+                offset,
+            });
+        }
+    }
+
+
+    let errors = broker.commit_offset(coord::CommitOffsetRequest{
+        group_id,
+        tps: tps,
+    }).await;
+
+    let mut err_map: HashMap<(String, u32), i16> = HashMap::new();
+    for (tp, err) in errors {
+        let code = match err {
+            ConsumerGroupError::CoordinatorLoadInProgress => 14,
+            ConsumerGroupError::CoordinatorNotAvailable => 15,
+            ConsumerGroupError::NotCoordinator => 16,
+            ConsumerGroupError::InvalidGeneration(_, _) => 22,
+            ConsumerGroupError::MemberNotFound(_) => 25,
+            ConsumerGroupError::RebalanceInProgress => 27,
+            ConsumerGroupError::GroupAuthorizationFailed => 30,
+            ConsumerGroupError::FencedInstanceId => 82,
+            _ => 33,
+        };
+        err_map.insert((tp.topic, tp.partition), code);
+    }
+
+    let mut topics_resp: Vec<OffsetCommitResponseTopic> = Vec::new();
+    for t in req.topics.iter() {
+        let mut partitions_resp: Vec<OffsetCommitResponsePartition> =
+            Vec::with_capacity(t.partitions.len());
+
+        for p in t.partitions.iter() {
+            let code = err_map
+                .get(&(t.name.clone(), p.partition_index as u32))
+                .copied()
+                .unwrap_or(0);
+
+            partitions_resp.push(OffsetCommitResponsePartition {
+                partition_index: p.partition_index,
+                error_code: code,
+            });
+        }
+
+        topics_resp.push(OffsetCommitResponseTopic {
+            name: t.name.clone(),
+            topic_id: 0,
+            partitions: partitions_resp,
+        });
+    }
+
+    let response = OffsetCommitResponse {
+        throttle_time_ms: 0,
+        topics: topics_resp,
+        ..Default::default()
+    };
+    Ok(ResponseType::OffsetCommit(response))
 }

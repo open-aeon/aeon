@@ -41,6 +41,10 @@ impl ConsumerGroup {
         self.generation_id + 1
     }
 
+    pub fn generation_id(&self) -> u32 {
+        self.generation_id
+    }
+
     pub fn commit_offset(&mut self, tp: TopicPartition, offset: i64) {
         self.offsets.insert(tp, offset);
     }
@@ -72,10 +76,10 @@ impl ConsumerGroup {
     pub fn remove_member(&mut self, member_id: &str) -> Option<ConsumerMember> {
         let member = self.members.remove(member_id);
         if member.is_some() {
-            self.state = GroupState::PreparingRebalance;
+            self.transition_to(GroupState::PreparingRebalance);
         }
         if self.members.is_empty() {
-            self.state = GroupState::Empty;
+           self.transition_to(GroupState::Empty);
         }
         member
     }
