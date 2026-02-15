@@ -52,7 +52,6 @@ impl Decoder for ServerCodec {
             1 => FetchRequest::decode(&mut cursor, api_version).map(RequestType::Fetch),
             2 => ListOffsetsRequest::decode(&mut cursor, api_version).map(RequestType::ListOffsets),
             3 => MetadataRequest::decode(&mut cursor, api_version).map(RequestType::Metadata),
-            19 => CreateTopicsRequest::decode(&mut cursor, api_version).map(RequestType::CreateTopics),
             8 => OffsetCommitRequest::decode(&mut cursor, api_version).map(RequestType::OffsetCommit),
             9 => OffsetFetchRequest::decode(&mut cursor, api_version).map(RequestType::OffsetFetch),
             10 => FindCoordinatorRequest::decode(&mut cursor, api_version).map(RequestType::FindCoordinator),
@@ -61,6 +60,7 @@ impl Decoder for ServerCodec {
             13 => LeaveGroupRequest::decode(&mut cursor, api_version).map(RequestType::LeaveGroup),
             14 => SyncGroupRequest::decode(&mut cursor, api_version).map(RequestType::SyncGroup),
             18 => ApiVersionsRequest::decode(&mut cursor, api_version).map(RequestType::ApiVersions),
+            19 => CreateTopicsRequest::decode(&mut cursor, api_version).map(RequestType::CreateTopics),
             _ => return Err(err_convert(ProtocolError::UnknownApiKey(header.api_key))),
         }.map_err(err_convert)?;
 

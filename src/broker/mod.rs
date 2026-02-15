@@ -361,7 +361,7 @@ impl Broker {
         match response_rx.await {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(e)) => Err(e),
-            Err(e) => Err(ConsumerGroupError::CoordinatorNotAvailable),
+            Err(_e) => Err(ConsumerGroupError::CoordinatorNotAvailable),
         }
     }
 

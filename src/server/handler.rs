@@ -76,15 +76,15 @@ async fn handle_api_versions(_req: &ApiVersionsRequest, _broker: &Broker, api_ve
         ApiVersion { api_key: 1, min_version: 4, max_version: 12, ..Default::default() }, // Fetch
         ApiVersion { api_key: 2, min_version: 1, max_version: 10, ..Default::default() }, // ListOffsets
         ApiVersion { api_key: 3, min_version: 0, max_version: 12, ..Default::default() }, // Metadata
-        ApiVersion { api_key: 19, min_version: 2, max_version: 7, ..Default::default() }, // CreateTopics
+        ApiVersion { api_key: 8, min_version: 2, max_version: 10, ..Default::default() }, // OffsetCommit
         ApiVersion { api_key: 9, min_version: 1, max_version: 10, ..Default::default() }, // OffsetFetch
         ApiVersion { api_key: 10, min_version: 0, max_version: 4, ..Default::default() }, // FindCoordinator
         ApiVersion { api_key: 11, min_version: 0, max_version: 9, ..Default::default() }, // JoinGroup
-        ApiVersion { api_key: 14, min_version: 0, max_version: 5, ..Default::default() }, // SyncGroup
-        ApiVersion { api_key: 18, min_version: 0, max_version: 3, ..Default::default() }, // ApiVersions
         ApiVersion { api_key: 12, min_version: 0, max_version: 4, ..Default::default() }, // Heartbeat
         ApiVersion { api_key: 13, min_version: 0, max_version: 5, ..Default::default() }, // LeaveGroup
-        ApiVersion { api_key: 8, min_version: 2, max_version: 10, ..Default::default() }, // OffsetCommit
+        ApiVersion { api_key: 14, min_version: 0, max_version: 5, ..Default::default() }, // SyncGroup
+        ApiVersion { api_key: 18, min_version: 0, max_version: 3, ..Default::default() }, // ApiVersions
+        ApiVersion { api_key: 19, min_version: 2, max_version: 7, ..Default::default() }, // CreateTopics
     ];
     let response = if api_version >= 3 {
         ApiVersionsResponse {
@@ -171,6 +171,8 @@ async fn handle_create_topics(req: &CreateTopicsRequest, broker: &Broker, api_ve
 }
 
 async fn handle_metadata(req: &MetadataRequest, broker: &Broker) -> Result<ResponseType> {
+    use std::collections::HashMap;
+    use crate::common::metadata::TopicMetadata;
     // The new MetadataRequest has a `topics` field of type `Vec<MetadataRequestTopic>`.
     // An empty vector means the client is requesting metadata for all topics.
     let topic_names_to_fetch: Vec<String> = req.topics.as_deref().unwrap_or_default()
@@ -178,18 +180,21 @@ async fn handle_metadata(req: &MetadataRequest, broker: &Broker) -> Result<Respo
         .filter_map(|t| t.name.clone())
         .collect();
 
-    let topics_meta = if topic_names_to_fetch.is_empty() && req.topics.is_some() {
-        // Case where client requested specific topics but all were null
-        Default::default()
-    } else if topic_names_to_fetch.is_empty() {
+    let mut topics_meta = if req.topics.is_none() {
         broker.get_all_topics_metadata().await?
+    } else if topic_names_to_fetch.is_empty() {
+        HashMap::new()
     } else {
         broker.get_topics_metadata(&topic_names_to_fetch).await?
     };
 
-    let kafka_topics: Vec<MetadataResponseTopic> = topics_meta.into_iter().map(|(topic_name, topic_meta)| {
-        let partitions: Vec<MetadataResponsePartition> = topic_meta.partitions.into_iter().map(|(partition_id, partition_meta)| {
-            MetadataResponsePartition {
+    let mut kafka_topics: Vec<MetadataResponseTopic> = Vec::new();
+
+    let build_ok_topic = |topic_name: String, topic_meta: TopicMetadata| -> MetadataResponseTopic {
+        let partitions: Vec<MetadataResponsePartition> = topic_meta
+            .partitions
+            .into_iter()
+            .map(|(partition_id, partition_meta)| MetadataResponsePartition {
                 error_code: 0,
                 partition_index: partition_id as i32,
                 leader_id: partition_meta.leader as i32,
@@ -197,17 +202,48 @@ async fn handle_metadata(req: &MetadataRequest, broker: &Broker) -> Result<Respo
                 replica_nodes: partition_meta.replicas.into_iter().map(|r| r as i32).collect(),
                 isr_nodes: partition_meta.isr.into_iter().map(|i| i as i32).collect(),
                 ..Default::default()
-            }
-        }).collect();
-
+            })
+            .collect();
+    
         MetadataResponseTopic {
             error_code: 0,
             name: Some(topic_name),
             partitions,
             ..Default::default()
         }
-    }).collect();
+    };
+    
+    if req.topics.is_none() {
+        for (topic_name, topic_meta) in topics_meta.drain() {
+            kafka_topics.push(build_ok_topic(topic_name, topic_meta));
+        }
+    } else {
+        for topic_name in topic_names_to_fetch {
+            if let Some(topic_meta) = topics_meta.remove(&topic_name) {
+                kafka_topics.push(build_ok_topic(topic_name, topic_meta));
+                continue;
+            }
 
+            if req.allow_auto_topic_creation {
+                let create_res = broker.create_topic(topic_name.clone(), 1).await;
+                if create_res.is_ok() || create_res.as_ref().err().map(|e| e.to_string().contains("already exists")).unwrap_or(false) {
+                    let one = vec![topic_name.clone()];
+                    let mut created_meta = broker.get_topics_metadata(&one).await?;
+                    if let Some(topic_meta) = created_meta.remove(&topic_name) {
+                        kafka_topics.push(build_ok_topic(topic_name, topic_meta));
+                        continue;
+                    }
+                }
+            }
+
+            kafka_topics.push(MetadataResponseTopic {
+                error_code: 3i16, // UNKNOWN_TOPIC_OR_PARTITION
+                name: Some(topic_name),
+                partitions: vec![],
+                ..Default::default()
+            });
+        }
+    }
     let b_meta = broker.metadata();
 
     let response = MetadataResponse {
@@ -223,7 +259,6 @@ async fn handle_metadata(req: &MetadataRequest, broker: &Broker) -> Result<Respo
         cluster_id: Some("aeon-cluster".to_string()), // Assuming a fixed cluster_id
         ..Default::default()
     };
-    // println!("[DEBUG] Sending MetadataResponse: {:?}", response);
     Ok(ResponseType::Metadata(response))
 }
 
