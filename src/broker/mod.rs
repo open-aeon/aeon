@@ -17,6 +17,7 @@ use crate::config::broker::BrokerConfig;
 use crate::config::storage::StorageConfig;
 use crate::coordinator::ConsumerGroup;
 use crate::common::metadata::OffsetCommitMetadata;
+use crate::error::consumer::ConsumerGroupError;
 use crate::kafka::codec::Decode;
 use crate::kafka::message::Record;
 use crate::kafka::message::RecordBatch;
@@ -336,12 +337,12 @@ impl Broker {
         }
     }
 
-    pub async fn leave_group(&self, request: LeaveGroupRequest) -> Result<()> {
+    pub async fn leave_group(&self, request: LeaveGroupRequest) -> std::result::Result<(), ConsumerGroupError> {
         let group_id = request.group_id.clone();
 
         let coordinator_tx = match self.coordinators.get(&group_id) {
             Some(tx) => tx.clone(), 
-            None => return Err(anyhow::anyhow!("Coordinator not found for group: {}", group_id)),
+            None => return Err(ConsumerGroupError::NotCoordinator),
         };
 
 
@@ -354,21 +355,21 @@ impl Broker {
 
         if coordinator_tx.send(command).await.is_err() {
             self.coordinators.remove(&group_id);
-            return Err(anyhow::anyhow!("Failed to leave group: {}", group_id));
+            return Err(ConsumerGroupError::CoordinatorNotAvailable);
         }
 
         match response_rx.await {
             Ok(Ok(_)) => Ok(()),
-            Ok(Err(e)) => Err(anyhow::anyhow!("Failed to leave group: {}", e)),
-            Err(e) => Err(anyhow::anyhow!("Failed to leave group: {}", e)),
+            Ok(Err(e)) => Err(e),
+            Err(_e) => Err(ConsumerGroupError::CoordinatorNotAvailable),
         }
     }
 
-    pub async fn heartbeat(&self, request: HeartbeatRequest) -> Result<()> {
+    pub async fn heartbeat(&self, request: HeartbeatRequest) -> std::result::Result<(), ConsumerGroupError> {
         let group_id = request.group_id.clone();
         let coordinator_tx = match self.coordinators.get(&group_id) {
-            Some(tx) => tx.clone(), 
-            None => return Err(anyhow::anyhow!("Coordinator not found for group: {}", group_id)),
+            Some(tx) => tx.clone(),
+            None => return Err(ConsumerGroupError::NotCoordinator),
         };
 
         let (response_tx, response_rx) = oneshot::channel();
@@ -380,41 +381,76 @@ impl Broker {
 
         if coordinator_tx.send(command).await.is_err() {
             self.coordinators.remove(&group_id);
-            return Err(anyhow::anyhow!("Failed to send heartbeat command to coordinator: {}", group_id));
+            return Err(ConsumerGroupError::CoordinatorNotAvailable);
         }
         
         match response_rx.await {
             Ok(Ok(_)) => Ok(()),
-            Ok(Err(e)) => Err(anyhow::anyhow!("Failed to send heartbeat command to coordinator: {}", e)),
-            Err(e) => Err(anyhow::anyhow!("Failed to send heartbeat command to coordinator: {}", e)),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(ConsumerGroupError::CoordinatorNotAvailable),
         }
     }
 
-    pub async fn commit_offset(&self, request: CommitOffsetRequest) -> Result<()> {
+    pub async fn commit_offset(&self, request: CommitOffsetRequest) -> Vec<(TopicPartition, ConsumerGroupError)> {
         let group_id = request.group_id.clone();
 
-        let message = OffsetCommitMetadata {
-            group_id: group_id.clone(),
-            topic: request.tp.topic.clone(),
-            partition: request.tp.partition,
-            offset: request.offset,
-            timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-        };
+        let mut errors: Vec<(TopicPartition, ConsumerGroupError)> = Vec::new();
+        let mut success_tps: Vec<CommitOffsetTp> = Vec::new();
+        for tp in request.tps.iter() {
+            let message = OffsetCommitMetadata {
+                group_id: group_id.clone(),
+                topic: tp.topic.clone(),
+                partition: tp.partition as u32,
+                offset: tp.offset,
+                timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+            };
 
-        self.persist_offset(&message).await.with_context(|| "Failed to persist offset")?;
+            let tp_key = TopicPartition {
+                topic: tp.topic.clone(),
+                partition: tp.partition,
+            };
+
+            if self.persist_offset(&message).await.is_err() {
+                errors.push((tp_key, ConsumerGroupError::CoordinatorNotAvailable));
+            } else {
+                success_tps.push(CommitOffsetTp {
+                    topic: tp.topic.clone(),
+                    partition: tp.partition,
+                    offset: tp.offset,
+                });
+            }
+        }
+
+        if success_tps.is_empty() {
+            return errors;
+        }
+    
 
         let coordinator_tx = self.coordinators.entry(group_id.clone()).or_insert_with(||
             GroupCoordinator::new(group_id.clone())).clone();
 
+        let command_request = CommitOffsetRequest {
+            group_id: group_id.clone(),
+            tps: success_tps,
+        };
+        
         let command = CoordinatorCommand::CommitOffset {
-            request,
+            request: command_request,
         };
 
         if coordinator_tx.send(command).await.is_err() {
-           eprintln!("Failed to send commit offset command to coordinator: {}", group_id);
-        };
-
-        Ok(())
+            for tp in request.tps.iter() {
+                let key = TopicPartition {
+                    topic: tp.topic.clone(),
+                    partition: tp.partition,
+                };
+                if !errors.iter().any(|(k, _)| k == &key) {
+                    errors.push((key, ConsumerGroupError::CoordinatorNotAvailable));
+                }
+            }
+        }
+    
+        errors
     }
 
     pub async fn fetch_offset(&self, request: FetchOffsetRequest) -> Result<Option<i64>> {
@@ -517,9 +553,8 @@ impl Broker {
 
         let record_batch_bytes = record_batch.encode_to_bytes(0)?;
 
-        // todo: use config to determine partition number
-        let p_num = 50;
-        let partition = (calculate_hash(&metadata.group_id) % p_num) as u32;
+        let p_num = self.config.internal_topic_partitions.max(1);
+        let partition = (calculate_hash(&metadata.group_id) % p_num as u64) as u32;
         let tp = TopicPartition {
             topic: self.config.internal_topic_name.clone(),
             partition,

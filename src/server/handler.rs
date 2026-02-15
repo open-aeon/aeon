@@ -1,8 +1,10 @@
 use anyhow::Result;
+use std::collections::HashMap;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::debug;
 
 use crate::broker::Broker;
+use crate::coordinator::CommitOffsetTp;
 use crate::error::protocol::ProtocolError;
 use crate::error::storage::StorageError;
 use crate::common::metadata::TopicPartition;
@@ -74,15 +76,15 @@ async fn handle_api_versions(_req: &ApiVersionsRequest, _broker: &Broker, api_ve
         ApiVersion { api_key: 1, min_version: 4, max_version: 12, ..Default::default() }, // Fetch
         ApiVersion { api_key: 2, min_version: 1, max_version: 10, ..Default::default() }, // ListOffsets
         ApiVersion { api_key: 3, min_version: 0, max_version: 12, ..Default::default() }, // Metadata
-        ApiVersion { api_key: 19, min_version: 2, max_version: 7, ..Default::default() }, // CreateTopics
+        ApiVersion { api_key: 8, min_version: 2, max_version: 10, ..Default::default() }, // OffsetCommit
         ApiVersion { api_key: 9, min_version: 1, max_version: 10, ..Default::default() }, // OffsetFetch
         ApiVersion { api_key: 10, min_version: 0, max_version: 4, ..Default::default() }, // FindCoordinator
         ApiVersion { api_key: 11, min_version: 0, max_version: 9, ..Default::default() }, // JoinGroup
-        ApiVersion { api_key: 14, min_version: 0, max_version: 5, ..Default::default() }, // SyncGroup
-        ApiVersion { api_key: 18, min_version: 0, max_version: 3, ..Default::default() }, // ApiVersions
         ApiVersion { api_key: 12, min_version: 0, max_version: 4, ..Default::default() }, // Heartbeat
         ApiVersion { api_key: 13, min_version: 0, max_version: 5, ..Default::default() }, // LeaveGroup
-        ApiVersion { api_key: 8, min_version: 2, max_version: 10, ..Default::default() }, // OffsetCommit
+        ApiVersion { api_key: 14, min_version: 0, max_version: 5, ..Default::default() }, // SyncGroup
+        ApiVersion { api_key: 18, min_version: 0, max_version: 3, ..Default::default() }, // ApiVersions
+        ApiVersion { api_key: 19, min_version: 2, max_version: 7, ..Default::default() }, // CreateTopics
     ];
     let response = if api_version >= 3 {
         ApiVersionsResponse {
@@ -169,6 +171,8 @@ async fn handle_create_topics(req: &CreateTopicsRequest, broker: &Broker, api_ve
 }
 
 async fn handle_metadata(req: &MetadataRequest, broker: &Broker) -> Result<ResponseType> {
+    use std::collections::HashMap;
+    use crate::common::metadata::TopicMetadata;
     // The new MetadataRequest has a `topics` field of type `Vec<MetadataRequestTopic>`.
     // An empty vector means the client is requesting metadata for all topics.
     let topic_names_to_fetch: Vec<String> = req.topics.as_deref().unwrap_or_default()
@@ -176,18 +180,21 @@ async fn handle_metadata(req: &MetadataRequest, broker: &Broker) -> Result<Respo
         .filter_map(|t| t.name.clone())
         .collect();
 
-    let topics_meta = if topic_names_to_fetch.is_empty() && req.topics.is_some() {
-        // Case where client requested specific topics but all were null
-        Default::default()
-    } else if topic_names_to_fetch.is_empty() {
+    let mut topics_meta = if req.topics.is_none() {
         broker.get_all_topics_metadata().await?
+    } else if topic_names_to_fetch.is_empty() {
+        HashMap::new()
     } else {
         broker.get_topics_metadata(&topic_names_to_fetch).await?
     };
 
-    let kafka_topics: Vec<MetadataResponseTopic> = topics_meta.into_iter().map(|(topic_name, topic_meta)| {
-        let partitions: Vec<MetadataResponsePartition> = topic_meta.partitions.into_iter().map(|(partition_id, partition_meta)| {
-            MetadataResponsePartition {
+    let mut kafka_topics: Vec<MetadataResponseTopic> = Vec::new();
+
+    let build_ok_topic = |topic_name: String, topic_meta: TopicMetadata| -> MetadataResponseTopic {
+        let partitions: Vec<MetadataResponsePartition> = topic_meta
+            .partitions
+            .into_iter()
+            .map(|(partition_id, partition_meta)| MetadataResponsePartition {
                 error_code: 0,
                 partition_index: partition_id as i32,
                 leader_id: partition_meta.leader as i32,
@@ -195,17 +202,48 @@ async fn handle_metadata(req: &MetadataRequest, broker: &Broker) -> Result<Respo
                 replica_nodes: partition_meta.replicas.into_iter().map(|r| r as i32).collect(),
                 isr_nodes: partition_meta.isr.into_iter().map(|i| i as i32).collect(),
                 ..Default::default()
-            }
-        }).collect();
-
+            })
+            .collect();
+    
         MetadataResponseTopic {
             error_code: 0,
             name: Some(topic_name),
             partitions,
             ..Default::default()
         }
-    }).collect();
+    };
+    
+    if req.topics.is_none() {
+        for (topic_name, topic_meta) in topics_meta.drain() {
+            kafka_topics.push(build_ok_topic(topic_name, topic_meta));
+        }
+    } else {
+        for topic_name in topic_names_to_fetch {
+            if let Some(topic_meta) = topics_meta.remove(&topic_name) {
+                kafka_topics.push(build_ok_topic(topic_name, topic_meta));
+                continue;
+            }
 
+            if req.allow_auto_topic_creation {
+                let create_res = broker.create_topic(topic_name.clone(), 1).await;
+                if create_res.is_ok() || create_res.as_ref().err().map(|e| e.to_string().contains("already exists")).unwrap_or(false) {
+                    let one = vec![topic_name.clone()];
+                    let mut created_meta = broker.get_topics_metadata(&one).await?;
+                    if let Some(topic_meta) = created_meta.remove(&topic_name) {
+                        kafka_topics.push(build_ok_topic(topic_name, topic_meta));
+                        continue;
+                    }
+                }
+            }
+
+            kafka_topics.push(MetadataResponseTopic {
+                error_code: 3i16, // UNKNOWN_TOPIC_OR_PARTITION
+                name: Some(topic_name),
+                partitions: vec![],
+                ..Default::default()
+            });
+        }
+    }
     let b_meta = broker.metadata();
 
     let response = MetadataResponse {
@@ -221,7 +259,6 @@ async fn handle_metadata(req: &MetadataRequest, broker: &Broker) -> Result<Respo
         cluster_id: Some("aeon-cluster".to_string()), // Assuming a fixed cluster_id
         ..Default::default()
     };
-    // println!("[DEBUG] Sending MetadataResponse: {:?}", response);
     Ok(ResponseType::Metadata(response))
 }
 
@@ -827,13 +864,136 @@ async fn handle_offset_fetch(req: &OffsetFetchRequest, broker: &Broker) -> Resul
 }
 
 async fn handle_heartbeat(req: &HeartbeatRequest, broker: &Broker) -> Result<ResponseType> {
-    todo!()
+    use crate::coordinator as coord;
+
+    let result = broker.heartbeat(coord::HeartbeatRequest {
+        group_id: req.group_id.clone(),
+        generation_id: req.generation_id,
+        member_id: req.member_id.clone(),
+        group_instance_id: req.group_instance_id.clone(),
+    }).await;
+
+    let error_code = match result {
+        Ok(()) => 0,
+        Err(e) => match e {
+            ConsumerGroupError::CoordinatorLoadInProgress => 14,
+            ConsumerGroupError::CoordinatorNotAvailable => 15,
+            ConsumerGroupError::NotCoordinator => 16,
+            ConsumerGroupError::InvalidGeneration(_, _) => 22,
+            ConsumerGroupError::MemberNotFound(_) => 25,
+            ConsumerGroupError::RebalanceInProgress => 27,
+            ConsumerGroupError::GroupAuthorizationFailed => 30,
+            ConsumerGroupError::FencedInstanceId => 82,
+            _ => 33,
+        },
+    };
+
+
+    let response = HeartbeatResponse {
+        throttle_time_ms: 0,
+        error_code,
+        ..Default::default()
+    };
+    Ok(ResponseType::Heartbeat(response))
 }
 
 async fn handle_leave_group(req: &LeaveGroupRequest, broker: &Broker) -> Result<ResponseType> {
-    todo!()
+    use crate::coordinator as coord;
+
+    let result = broker.leave_group(coord::LeaveGroupRequest {
+        group_id: req.group_id.clone(),
+        member_id: req.member_id.clone(),
+    }).await;
+
+    let error_code = match result {
+        Ok(()) => 0,
+        Err(e) => match e {
+            ConsumerGroupError::CoordinatorLoadInProgress => 14,
+            ConsumerGroupError::CoordinatorNotAvailable => 15,
+            ConsumerGroupError::NotCoordinator => 16,
+            ConsumerGroupError::InvalidGeneration(_, _) => 22,
+            ConsumerGroupError::MemberNotFound(_) => 25,
+            ConsumerGroupError::RebalanceInProgress => 27,
+            ConsumerGroupError::GroupAuthorizationFailed => 30,
+            ConsumerGroupError::FencedInstanceId => 82,
+            _ => 33,
+        },
+    };
+
+    let response = LeaveGroupResponse {
+        error_code,
+        ..Default::default()
+    };
+    Ok(ResponseType::LeaveGroup(response))
 }
 
 async fn handle_offset_commit(req: &OffsetCommitRequest, broker: &Broker) -> Result<ResponseType> {
-    todo!()
+    use crate::coordinator as coord;
+
+    let mut tps: Vec<CommitOffsetTp> = Vec::new();
+    let group_id = req.group_id.clone();
+    for t in req.topics.iter() {
+        for p in t.partitions.iter() {
+            let partition  = p.partition_index as u32;
+            let offset = p.committed_offset;
+            tps.push(CommitOffsetTp{
+                topic: t.name.clone(),
+                partition,
+                offset,
+            });
+        }
+    }
+
+
+    let errors = broker.commit_offset(coord::CommitOffsetRequest{
+        group_id,
+        tps: tps,
+    }).await;
+
+    let mut err_map: HashMap<(String, u32), i16> = HashMap::new();
+    for (tp, err) in errors {
+        let code = match err {
+            ConsumerGroupError::CoordinatorLoadInProgress => 14,
+            ConsumerGroupError::CoordinatorNotAvailable => 15,
+            ConsumerGroupError::NotCoordinator => 16,
+            ConsumerGroupError::InvalidGeneration(_, _) => 22,
+            ConsumerGroupError::MemberNotFound(_) => 25,
+            ConsumerGroupError::RebalanceInProgress => 27,
+            ConsumerGroupError::GroupAuthorizationFailed => 30,
+            ConsumerGroupError::FencedInstanceId => 82,
+            _ => 33,
+        };
+        err_map.insert((tp.topic, tp.partition), code);
+    }
+
+    let mut topics_resp: Vec<OffsetCommitResponseTopic> = Vec::new();
+    for t in req.topics.iter() {
+        let mut partitions_resp: Vec<OffsetCommitResponsePartition> =
+            Vec::with_capacity(t.partitions.len());
+
+        for p in t.partitions.iter() {
+            let code = err_map
+                .get(&(t.name.clone(), p.partition_index as u32))
+                .copied()
+                .unwrap_or(0);
+
+            partitions_resp.push(OffsetCommitResponsePartition {
+                partition_index: p.partition_index,
+                error_code: code,
+            });
+        }
+
+        topics_resp.push(OffsetCommitResponseTopic {
+            name: t.name.clone(),
+            topic_id: 0,
+            partitions: partitions_resp,
+        });
+    }
+
+    let response = OffsetCommitResponse {
+        throttle_time_ms: 0,
+        topics: topics_resp,
+        ..Default::default()
+    };
+    Ok(ResponseType::OffsetCommit(response))
 }

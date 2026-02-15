@@ -20,6 +20,21 @@ pub enum ConsumerGroupError {
     #[error("Member '{0}' is not the leader.")]
     NotLeader(String),
 
+    #[error("Static member is fenced by another member with the same instance id.")]
+    FencedInstanceId,
+
     #[error("Rebalance is already in progress.")]
     RebalanceInProgress,
+
+    #[error("Coordinator not available.")]
+    CoordinatorNotAvailable,
+
+    #[error("Not coordinator.")]
+    NotCoordinator,
+
+    #[error("Coordinator load in progress.")]
+    CoordinatorLoadInProgress,
+
+    #[error("Group authorization failed.")]
+    GroupAuthorizationFailed,
 }

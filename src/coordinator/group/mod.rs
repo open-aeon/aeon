@@ -82,12 +82,19 @@ pub struct LeaveGroupRequest {
 
 pub struct HeartbeatRequest {
     pub group_id: String,
+    pub generation_id: i32,
     pub member_id: String,
+    pub group_instance_id: Option<String>,
 }
 
 pub struct CommitOffsetRequest {
     pub group_id: String,
-    pub tp: TopicPartition,
+    pub tps: Vec<CommitOffsetTp>,
+}
+
+pub struct CommitOffsetTp {
+    pub topic: String,
+    pub partition: u32,
     pub offset: i64,
 }
 
@@ -315,7 +322,12 @@ impl GroupCoordinator {
     }
 
     fn handle_commit_offset(&mut self, request: CommitOffsetRequest) {
-        self.group.commit_offset(request.tp, request.offset);
+        for tp in request.tps.iter() {
+            self.group.commit_offset(TopicPartition {
+                topic: tp.topic.clone(),
+                partition: tp.partition,
+            }, tp.offset);
+        }
     }
 
     fn handle_fetch_offset(&mut self, request: FetchOffsetRequest, response_tx: oneshot::Sender<Result<Option<i64>, ConsumerGroupError>>) {
