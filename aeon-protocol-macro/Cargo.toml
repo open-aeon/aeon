@@ -1,7 +1,8 @@
 [package]
-name = "bifrost-protocol-macro"
+name = "aeon-protocol-macro"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 
 [lib]
 proc-macro = true

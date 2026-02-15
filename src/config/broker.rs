@@ -35,7 +35,7 @@ fn default_cleanup_interval() -> Option<u64> {
 }
 
 fn default_internal_topic_name() -> String {
-    "__bifrost_offsets".to_string()
+    "__aeon_offsets".to_string()
 }
 
 fn default_internal_topic_partitions() -> u32 {

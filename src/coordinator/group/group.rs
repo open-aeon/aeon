@@ -1,79 +1,13 @@
-use std::{collections::{HashMap}, time::{Duration, Instant}};
-use anyhow::Result;
+use std::collections::HashMap;
+use std::time::Instant;
+
+use log::{debug, info};
 use tokio::sync::oneshot;
 
 use crate::common::metadata::TopicPartition;
 use crate::error::consumer::ConsumerGroupError;
 
-#[derive(Clone, Debug)]
-pub struct JoinGroupResult {
-    pub generation_id: u32,
-    pub member_id: String,
-    pub members: Vec<MemberInfo>,
-    pub protocol: Option<String>,
-    pub leader_id: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct MemberInfo {
-    pub id: String,
-    pub metadata: Vec<u8>,
-}
-
-#[derive(Debug)]
-pub struct LeaveGroupResult {}
-
-#[derive(Debug)]
-pub struct HeartbeatResult {}
-
-#[derive(Debug)]
-pub struct CommitOffsetResponse {
-    pub results: Vec<TopicPartitionResult>,
-}
-
-#[derive(Debug)]
-pub struct TopicPartitionResult {
-    pub topic: String,
-    pub partition: u32,
-}
-
-#[derive(Debug)]
-pub struct FetchOffsetResponse {
-    pub results: Vec<TopicPartitionOffsetResult>,
-}
-
-#[derive(Debug)]
-pub struct TopicPartitionOffsetResult {
-    pub topic: String,
-    pub partition: u32,
-    pub offset: i64,
-}
-
-#[derive(Debug)]
-pub struct SyncGroupResult {
-    pub assignment: Vec<(String, Vec<u32>)>,
-}
-
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum GroupState {
-    Empty,
-    PreparingRebalance,
-    CompletingRebalance,
-    Stable,
-}
-
-#[derive(Debug, Clone)]
-pub struct ConsumerMember {
-    pub id: String,
-    pub group_instance_id: Option<String>,
-    pub session_timeout: Duration,
-    pub rebalance_timeout: Duration, // todo: 为什么要这个字段？
-    pub topics: Vec<String>,
-    pub supported_protocols: Vec<(String,Vec<u8>)>,
-    pub last_heartbeat: Instant,
-    pub assignment: Vec<(String, Vec<u32>)>,
-}
+use super::{ConsumerMember, GroupState, JoinGroupResult, MemberInfo, SyncGroupResult};
 
 #[derive(Debug)]
 pub struct ConsumerGroup {
@@ -116,17 +50,13 @@ impl ConsumerGroup {
     }
 
     pub fn add_member(&mut self, member: ConsumerMember) {
-        // 静态成员：若带有 group_instance_id，则替换同 instance 的旧成员
         if let Some(ref instance_id) = member.group_instance_id {
-            // 查找是否已有相同 instance_id 的成员
             if let Some((old_id, _old_member)) = self.members.iter()
                 .find(|(_, m)| m.group_instance_id.as_ref() == Some(instance_id))
                 .map(|(k, v)| (k.clone(), v.clone())) {
-                // 保留旧成员的 assignment
                 let preserved_assignment = _old_member.assignment.clone();
                 self.members.remove(&old_id);
                 let mut new_member = member;
-                // 传承 assignment
                 if new_member.assignment.is_empty() {
                     new_member.assignment = preserved_assignment;
                 }
@@ -134,7 +64,9 @@ impl ConsumerGroup {
                 return;
             }
         }
+        info!("[ConsumerGroup] Adding member '{}' to group '{}'.", member.id, self.name);
         self.members.insert(member.id.clone(), member);
+        debug!("[ConsumerGroup] Members: {:?}", self.members);
     }
 
     pub fn remove_member(&mut self, member_id: &str) -> Option<ConsumerMember> {
@@ -165,7 +97,7 @@ impl ConsumerGroup {
         }
     }
 
-    pub fn complete_join_phase(&mut self) -> Result<HashMap<String, JoinGroupResult>, ConsumerGroupError> {
+    pub fn complete_join_phase(&mut self) -> std::result::Result<HashMap<String, JoinGroupResult>, ConsumerGroupError> {
         if self.state != GroupState::PreparingRebalance {
             return Err(ConsumerGroupError::InvalidState);
         }
@@ -177,7 +109,6 @@ impl ConsumerGroup {
             return Ok(HashMap::new());
         }
 
-        // 自增代数，从 1 开始
         self.generation_id = self.generation_id + 1;
 
         self.elect_leader()?;
@@ -199,61 +130,50 @@ impl ConsumerGroup {
             .collect();
 
         let mut results = HashMap::new();
-        
         for member_id in self.members.keys() {
             let is_leader = member_id == &leader_id;
-
             let result = JoinGroupResult {
-                members: if is_leader { leader_member_info.clone() } else { vec![] },
-                member_id: member_id.clone(),
                 generation_id: self.generation_id,
-                protocol: Some(protocol.clone()),
+                member_id: member_id.clone(),
+                members: if is_leader { leader_member_info.clone() } else { vec![] },
+                protocol: self.protocol.clone(),
                 leader_id: leader_id.clone(),
             };
             results.insert(member_id.clone(), result);
         }
-
         self.state = GroupState::CompletingRebalance;
 
         Ok(results)
     }
 
-    fn elect_leader(&mut self) -> Result<(), ConsumerGroupError> {
+    pub fn elect_leader(&mut self) -> std::result::Result<(), ConsumerGroupError> {
+        // Step 1: Select leader (first member)
         let leader_id = match self.members.keys().next() {
             Some(id) => id.clone(),
-            None => return Ok(()),
+            None => return Err(ConsumerGroupError::InvalidState),
         };
 
-        self.leader_id = Some(leader_id.clone());
-
+        // Step 2: Select common protocol
         let leader = self.members.get(&leader_id).unwrap();
-        let mut protocol_chosen = None;
-
-        for(protocol_name, _) in &leader.supported_protocols {
+        for (protocol, _) in &leader.supported_protocols {
             let all_members_support = self.members.values().all(|m| {
-                m.supported_protocols.iter().any(|(p, _)| p == protocol_name)
+                m.supported_protocols.iter().any(|(p, _)| p == protocol)
             });
-
             if all_members_support {
-                protocol_chosen = Some(protocol_name.clone());
+                self.protocol = Some(protocol.clone());
                 break;
             }
         }
 
-        if let Some(protocol) = protocol_chosen {
-            self.protocol = Some(protocol);
-            Ok(())
-        } else {
-            self.leader_id = None;
-            Err(ConsumerGroupError::NoCommonProtocol)
+        if self.protocol.is_none() {
+            return Err(ConsumerGroupError::NoCommonProtocol);
         }
+
+        self.leader_id = Some(leader_id);
+        Ok(())
     }
 
-    pub fn transition_to(&mut self, state: GroupState) {
-        self.state = state;
-    }
-
-    pub fn get_all_assignments(&self) -> HashMap<String, Vec<(String, Vec<u32>)>> {
+    pub fn assignment_snapshot(&self) -> HashMap<String, Vec<(String, Vec<u32>)>> {
         self.members.iter().map(|(m_id, m)| (m_id.clone(), m.assignment.clone())).collect()
     }
 
@@ -263,11 +183,7 @@ impl ConsumerGroup {
         generation_id: u32,
         assignments: HashMap<String, Vec<(String, Vec<u32>)>>,
     ) -> Result<(), ConsumerGroupError> {
-        if self.state != GroupState::CompletingRebalance {
-            return Err(ConsumerGroupError::InvalidState);
-        }
-
-        if self.generation_id != generation_id {
+        if generation_id != self.generation_id {
             return Err(ConsumerGroupError::InvalidGeneration(generation_id, self.generation_id));
         }
 
@@ -280,8 +196,19 @@ impl ConsumerGroup {
                 member.assignment = assignment;
             }
         }
-        
+
         Ok(())
+    }
+
+    pub fn get_all_assignments(&self) -> HashMap<String, Vec<(String, Vec<u32>)>> {
+        self.members
+            .iter()
+            .map(|(m_id, m)| (m_id.clone(), m.assignment.clone()))
+            .collect()
+    }
+
+    pub fn transition_to(&mut self, state: GroupState) {
+        self.state = state;
     }
 
     pub fn all_members_synced(&self, pending_sync_responders: &HashMap<String, oneshot::Sender<Result<SyncGroupResult, ConsumerGroupError>>>) -> bool {

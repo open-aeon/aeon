@@ -1,15 +1,15 @@
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use log::debug;
 
 use crate::broker::Broker;
 use crate::error::protocol::ProtocolError;
 use crate::error::storage::StorageError;
 use crate::common::metadata::TopicPartition;
 use crate::kafka::protocol::*;
-use crate::kafka::message::RecordBatch;
-use crate::kafka::codec::Decode;
 use crate::kafka::{Request, RequestType, Response, ResponseHeader, ResponseType};
 use crate::utils::hash::calculate_hash;
+use crate::error::consumer::ConsumerGroupError;
 
 // todo: broker是否可以换为&Arc<Broker>
 pub async fn handle_request(request: Request, broker: &Broker) -> Result<Response> {
@@ -28,6 +28,9 @@ pub async fn handle_request(request: Request, broker: &Broker) -> Result<Respons
         RequestType::JoinGroup(req) => handle_join_group(&req, broker).await?,
         RequestType::SyncGroup(req) => handle_sync_group(&req, broker).await?,
         RequestType::OffsetFetch(req) => handle_offset_fetch(&req, broker).await?,
+        RequestType::Heartbeat(req) => handle_heartbeat(&req, broker).await?,
+        RequestType::LeaveGroup(req) => handle_leave_group(&req, broker).await?,
+        RequestType::OffsetCommit(req) => handle_offset_commit(&req, broker).await?,
     };
 
     Ok(Response {
@@ -77,6 +80,9 @@ async fn handle_api_versions(_req: &ApiVersionsRequest, _broker: &Broker, api_ve
         ApiVersion { api_key: 11, min_version: 0, max_version: 9, ..Default::default() }, // JoinGroup
         ApiVersion { api_key: 14, min_version: 0, max_version: 5, ..Default::default() }, // SyncGroup
         ApiVersion { api_key: 18, min_version: 0, max_version: 3, ..Default::default() }, // ApiVersions
+        ApiVersion { api_key: 12, min_version: 0, max_version: 4, ..Default::default() }, // Heartbeat
+        ApiVersion { api_key: 13, min_version: 0, max_version: 5, ..Default::default() }, // LeaveGroup
+        ApiVersion { api_key: 8, min_version: 2, max_version: 10, ..Default::default() }, // OffsetCommit
     ];
     let response = if api_version >= 3 {
         ApiVersionsResponse {
@@ -200,16 +206,19 @@ async fn handle_metadata(req: &MetadataRequest, broker: &Broker) -> Result<Respo
         }
     }).collect();
 
+    let b_meta = broker.metadata();
+
     let response = MetadataResponse {
         brokers: vec![MetadataResponseBroker {
             node_id: 0,
-            host: "localhost".to_string(),
-            port: 8080,
+            host: b_meta.host.clone(),
+            port: b_meta.port as i32,
+            rack: None,
             ..Default::default()
         }],
         controller_id: 0, // Hardcoding controller ID for now
         topics: kafka_topics,
-        cluster_id: Some("bifrost-cluster".to_string()), // Assuming a fixed cluster_id
+        cluster_id: Some("aeon-cluster".to_string()), // Assuming a fixed cluster_id
         ..Default::default()
     };
     // println!("[DEBUG] Sending MetadataResponse: {:?}", response);
@@ -316,23 +325,21 @@ async fn handle_fetch(req: &FetchRequest, broker: &Broker) -> Result<ResponseTyp
                 req.max_bytes.max(0) as usize
             };
 
+            let high_watermark = broker.latest_offset(&tp).await.unwrap_or(0) as i64;
+
             match broker.read_batch(&tp, start_offset, max_bytes).await {
                 Ok(batches) => {
                     if batches.is_empty() {
                         partition_responses.push(PartitionData{
                             partition_index: p.partition,
                             error_code: 0,
-                            high_watermark: p.fetch_offset,
-                            last_stable_offset: p.fetch_offset,
+                            high_watermark,
+                            last_stable_offset: high_watermark,
                             log_start_offset: 0,
                             records: Some(bytes::Bytes::new()),
                             ..Default::default()
                         });
                     } else {
-                        let mut last_batch_bytes = batches.last().unwrap().clone();
-                        let record_batch = RecordBatch::decode(&mut last_batch_bytes, 0)?;
-                        let next_offset = record_batch.base_offset + record_batch.last_offset_delta as i64 + 1;
-
                         let mut buf = BytesMut::new();
                         for b in batches {
                             buf.extend_from_slice(&b);
@@ -342,8 +349,8 @@ async fn handle_fetch(req: &FetchRequest, broker: &Broker) -> Result<ResponseTyp
                         partition_responses.push(PartitionData {
                             partition_index: p.partition,
                             error_code: 0,
-                            high_watermark: next_offset,
-                            last_stable_offset: next_offset,
+                            high_watermark,
+                            last_stable_offset: high_watermark,
                             log_start_offset: 0,
                             records: Some(records_bytes),
                             ..Default::default()
@@ -467,7 +474,7 @@ async fn handle_find_coordinator(req: &FindCoordinatorRequest, broker: &Broker, 
                     0
                 };
                 
-                // 在单节点Bifrost中，任何分区的Leader都是自己，所以直接返回自身信息
+                // 在单节点aeon中，任何分区的Leader都是自己，所以直接返回自身信息
                 coordinator.node_id = broker_meta.id as i32;
                 coordinator.host = broker_meta.host.clone();
                 coordinator.port = broker_meta.port as i32;
@@ -511,7 +518,7 @@ async fn handle_find_coordinator(req: &FindCoordinatorRequest, broker: &Broker, 
                 0
             };
 
-            // 在单节点Bifrost中，任何分区的Leader都是自己
+            // 在单节点aeon中，任何分区的Leader都是自己
             response_node_id = broker_meta.id as i32;
             response_host = broker_meta.host.clone();
             response_port = broker_meta.port as i32;
@@ -537,12 +544,12 @@ async fn handle_find_coordinator(req: &FindCoordinatorRequest, broker: &Broker, 
 }
 
 async fn handle_join_group(req: &JoinGroupRequest, broker: &Broker) -> Result<ResponseType> {
-    use crate::broker::coordinator as coord;
+    use crate::coordinator as coord;
 
     // v4+ 两步 Join：若 member_id 为空，先返回 MEMBER_ID_REQUIRED 并下发分配的 member_id
     if req.member_id.is_empty() {
         // 79 = MEMBER_ID_REQUIRED（Kafka 标准错误码）
-        let assigned = format!("bifrost-{}", uuid::Uuid::new_v4());
+        let assigned = format!("aeon-{}", uuid::Uuid::new_v4());
         let resp = JoinGroupResponse {
             throttle_time_ms: 0,
             error_code: 79,
@@ -586,8 +593,12 @@ async fn handle_join_group(req: &JoinGroupRequest, broker: &Broker) -> Result<Re
         supported_protocols,
     };
 
-    let result = broker.join_group(join_req).await?;
+    let result = broker.join_group(join_req).await;
+    if let Err(e) = &result {
+       println!("Failed to join group: {}", e);
+    }
 
+    let result = result.unwrap();
     // 5) 构造响应（按版本，过程宏会处理可用字段）
     let members: Vec<JoinGroupResponseMember> = result
         .members
@@ -612,15 +623,14 @@ async fn handle_join_group(req: &JoinGroupRequest, broker: &Broker) -> Result<Re
         members,
         ..Default::default()
     };
-    println!("[DEBUG] JoinGroupResponse: {:?}", response);
+    // println!("[DEBUG] JoinGroupResponse: {:?}", response);
 
     Ok(ResponseType::JoinGroup(response))
 }
 
 async fn handle_sync_group(req: &SyncGroupRequest, broker: &Broker) -> Result<ResponseType> {
-    use crate::broker::coordinator as coord;
+    use crate::coordinator as coord;
 
-    // 1) 解析 leader 的 assignment（只有 leader 会携带，其他成员为空）
     fn decode_member_assignment(raw: &Bytes) -> anyhow::Result<Vec<(String, Vec<u32>)>> {
         let mut buf = raw.clone();
 
@@ -694,26 +704,39 @@ async fn handle_sync_group(req: &SyncGroupRequest, broker: &Broker) -> Result<Re
         assignment_map.insert(a.member_id.clone(), parsed);
     }
 
-    // 2) 调用协调器，获取该成员的最终分配
+
     let result = broker.sync_group(coord::SyncGroupRequest {
         group_id: req.group_id.clone(),
         member_id: req.member_id.clone(),
         generation_id: req.generation_id as u32,
         assignment: assignment_map,
-    }).await?;
+    }).await;
 
-    // 3) 将该成员的 assignment 编码回标准的 MemberAssignment bytes
-    let encoded = encode_member_assignment(&result.assignment);
+    let (error_code, assignment) = match result {
+        Ok(r) => (0i16, encode_member_assignment(&r.assignment)),
+        Err(e) => {
+            let code = if let Some(cge) = e.downcast_ref::<ConsumerGroupError>() {
+                match cge {
+                    ConsumerGroupError::RebalanceInProgress => 27,
+                    _ => 33,
+                }
+            } else {
+                33
+            };
+            (code, encode_member_assignment(&[]))
+        }
+    };
+
 
     let response = SyncGroupResponse {
         throttle_time_ms: 0,
-        error_code: 0,
+        error_code,
         protocol_type: req.protocol_type.clone(),
         protocol_name: req.protocol_name.clone(),
-        assignment: encoded,
+        assignment,
         ..Default::default()
     };
-    println!("[DEBUG] SyncGroupResponse: {:?}", response);
+    debug!("SyncGroupResponse: {:?}", response);
     Ok(ResponseType::SyncGroup(response))
 }
 
@@ -732,7 +755,7 @@ async fn handle_offset_fetch(req: &OffsetFetchRequest, broker: &Broker) -> Resul
                         let mut partitions_resp: Vec<OffsetFetchResponsePartitions> = Vec::with_capacity(t.partition_indexes.len());
                         for &p in &t.partition_indexes {
                             let tp = TopicPartition { topic: topic_name.clone(), partition: p as u32 };
-                            let off = broker.fetch_offset(crate::broker::coordinator::FetchOffsetRequest { group_id: g.group_id.clone(), tp }).await.ok().flatten();
+                            let off = broker.fetch_offset(crate::coordinator::FetchOffsetRequest { group_id: g.group_id.clone(), tp }).await.ok().flatten();
                             partitions_resp.push(OffsetFetchResponsePartitions {
                                 partition_index: p,
                                 committed_offset: off.unwrap_or(-1),
@@ -765,7 +788,7 @@ async fn handle_offset_fetch(req: &OffsetFetchRequest, broker: &Broker) -> Resul
             throttle_time_ms: 0,
             ..Default::default()
         };
-        println!("[DEBUG]OffsetFetchResponse: {:?}", response);
+        debug!("OffsetFetchResponse: {:?}", response);
         return Ok(ResponseType::OffsetFetch(response));
     }
 
@@ -776,7 +799,7 @@ async fn handle_offset_fetch(req: &OffsetFetchRequest, broker: &Broker) -> Resul
             let mut partitions_resp: Vec<OffsetFetchResponsePartition> = Vec::with_capacity(t.partition_indexes.len());
             for &p in &t.partition_indexes {
                 let tp = TopicPartition { topic: t.name.clone(), partition: p as u32 };
-                let off = broker.fetch_offset(crate::broker::coordinator::FetchOffsetRequest { group_id: req.group_id.clone(), tp }).await.ok().flatten();
+                let off = broker.fetch_offset(crate::coordinator::FetchOffsetRequest { group_id: req.group_id.clone(), tp }).await.ok().flatten();
                 partitions_resp.push(OffsetFetchResponsePartition {
                     partition_index: p,
                     committed_offset: off.unwrap_or(-1),
@@ -801,4 +824,16 @@ async fn handle_offset_fetch(req: &OffsetFetchRequest, broker: &Broker) -> Resul
         ..Default::default()
     };
     Ok(ResponseType::OffsetFetch(response))
+}
+
+async fn handle_heartbeat(req: &HeartbeatRequest, broker: &Broker) -> Result<ResponseType> {
+    todo!()
+}
+
+async fn handle_leave_group(req: &LeaveGroupRequest, broker: &Broker) -> Result<ResponseType> {
+    todo!()
+}
+
+async fn handle_offset_commit(req: &OffsetCommitRequest, broker: &Broker) -> Result<ResponseType> {
+    todo!()
 }

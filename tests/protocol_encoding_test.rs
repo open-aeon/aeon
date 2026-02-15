@@ -1,7 +1,7 @@
 //! tests/protocol_encoding_test.rs
 
-use bifrost::kafka::codec::{Decode, Encode};
-use bifrost::kafka::protocol::*;
+use aeon::kafka::codec::{Decode, Encode};
+use aeon::kafka::protocol::*;
 use bytes::BytesMut;
 
 /// A round-trip test for a flexible version of ApiVersionsResponse.

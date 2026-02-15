@@ -2,6 +2,7 @@ pub mod codec;
 pub mod message;
 pub mod protocol;
 pub mod offsets;
+pub mod errors;
 
 use bytes::{Buf, BufMut};
 use crate::error::protocol::{ProtocolError, Result};
@@ -118,6 +119,9 @@ pub enum RequestType {
     JoinGroup(JoinGroupRequest),
     SyncGroup(SyncGroupRequest),
     ApiVersions(ApiVersionsRequest),
+    Heartbeat(HeartbeatRequest),
+    LeaveGroup(LeaveGroupRequest),
+    OffsetCommit(OffsetCommitRequest),
 }
 
 #[derive(Debug)]
@@ -173,6 +177,9 @@ pub enum ResponseType {
     SyncGroup(SyncGroupResponse),
     FindCoordinator(FindCoordinatorResponse),
     OffsetFetch(OffsetFetchResponse),
+    Heartbeat(HeartbeatResponse),
+    LeaveGroup(LeaveGroupResponse),
+    OffsetCommit(OffsetCommitResponse),
 }
 
 #[derive(Debug)]
@@ -198,6 +205,9 @@ impl Encode for Response {
             ResponseType::SyncGroup(response) => response.encode(buf, api_version),
             ResponseType::FindCoordinator(response) => response.encode(buf, api_version),
             ResponseType::OffsetFetch(response) => response.encode(buf, api_version),
+            ResponseType::Heartbeat(response) => response.encode(buf, api_version),
+            ResponseType::LeaveGroup(response) => response.encode(buf, api_version),
+            ResponseType::OffsetCommit(response) => response.encode(buf, api_version),
         }
     }
 }

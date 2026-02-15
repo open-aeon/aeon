@@ -1,8 +1,3 @@
-pub mod partition;
-pub mod topic;
-pub mod consumer_group;
-pub mod coordinator;
-
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -11,13 +6,15 @@ use tokio::sync::{RwLock, Mutex, mpsc, oneshot, watch};
 use bytes::Bytes;
 use chrono::Utc;
 
-use crate::broker::coordinator::*;
-use crate::broker::consumer_group::*;
+pub mod topic;
+pub mod partition;
+
+use crate::coordinator::*;
 use crate::broker::topic::Topic;
 use crate::common::metadata::{TopicMetadata, TopicPartition};
 use crate::config::broker::BrokerConfig;
 use crate::config::storage::StorageConfig;
-use crate::broker::consumer_group::ConsumerGroup;
+use crate::coordinator::ConsumerGroup;
 use crate::common::metadata::OffsetCommitMetadata;
 use crate::kafka::codec::Decode;
 use crate::kafka::message::Record;
@@ -377,6 +374,7 @@ impl Broker {
 
         if coordinator_tx.send(command).await.is_err() {
             self.coordinators.remove(&group_id);
+            println!("Failed to join group: {}", group_id);
             return Err(anyhow::anyhow!("Failed to join group: {}", group_id));
         }
 
@@ -389,51 +387,55 @@ impl Broker {
 
     pub async fn leave_group(&self, request: LeaveGroupRequest) -> Result<()> {
         let group_id = request.group_id.clone();
-        if let Some(coordinator_tx) = self.coordinators.get(&group_id) {
-            let (response_tx, response_rx) = oneshot::channel();
 
-            let command = CoordinatorCommand::LeaveGroup {
-                request,
-                response_tx,
-            };
+        let coordinator_tx = match self.coordinators.get(&group_id) {
+            Some(tx) => tx.clone(), 
+            None => return Err(anyhow::anyhow!("Coordinator not found for group: {}", group_id)),
+        };
 
-            if coordinator_tx.send(command).await.is_err() {
-                self.coordinators.remove(&group_id);
-                return Err(anyhow::anyhow!("Failed to leave group: {}", group_id));
-            }
 
-            match response_rx.await {
-                Ok(Ok(_)) => Ok(()),
-                Ok(Err(e)) => Err(anyhow::anyhow!("Failed to leave group: {}", e)),
-                Err(e) => Err(anyhow::anyhow!("Failed to leave group: {}", e)),
-            }
-        } else {
-            Err(anyhow::anyhow!("Coordinator not found for group: {}", group_id))
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let command = CoordinatorCommand::LeaveGroup {
+            request,
+            response_tx,
+        };
+
+        if coordinator_tx.send(command).await.is_err() {
+            self.coordinators.remove(&group_id);
+            return Err(anyhow::anyhow!("Failed to leave group: {}", group_id));
+        }
+
+        match response_rx.await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(anyhow::anyhow!("Failed to leave group: {}", e)),
+            Err(e) => Err(anyhow::anyhow!("Failed to leave group: {}", e)),
         }
     }
 
     pub async fn heartbeat(&self, request: HeartbeatRequest) -> Result<()> {
         let group_id = request.group_id.clone();
-        if let Some(coordinator_tx) = self.coordinators.get(&group_id) {
-            let (response_tx, response_rx) = oneshot::channel();
+        let coordinator_tx = match self.coordinators.get(&group_id) {
+            Some(tx) => tx.clone(), 
+            None => return Err(anyhow::anyhow!("Coordinator not found for group: {}", group_id)),
+        };
 
-            let command = CoordinatorCommand::Heartbeat {
-                request,
-                response_tx,
-            };
+        let (response_tx, response_rx) = oneshot::channel();
 
-            if coordinator_tx.send(command).await.is_err() {
-                self.coordinators.remove(&group_id);
-                return Err(anyhow::anyhow!("Failed to send heartbeat command to coordinator: {}", group_id));
-            }
-            
-            match response_rx.await {
-                Ok(Ok(_)) => Ok(()),
-                Ok(Err(e)) => Err(anyhow::anyhow!("Failed to send heartbeat command to coordinator: {}", e)),
-                Err(e) => Err(anyhow::anyhow!("Failed to send heartbeat command to coordinator: {}", e)),
-            }
-        } else {
-            Err(anyhow::anyhow!("Coordinator not found for group: {}", group_id))
+        let command = CoordinatorCommand::Heartbeat {
+            request,
+            response_tx,
+        };
+
+        if coordinator_tx.send(command).await.is_err() {
+            self.coordinators.remove(&group_id);
+            return Err(anyhow::anyhow!("Failed to send heartbeat command to coordinator: {}", group_id));
+        }
+        
+        match response_rx.await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(anyhow::anyhow!("Failed to send heartbeat command to coordinator: {}", e)),
+            Err(e) => Err(anyhow::anyhow!("Failed to send heartbeat command to coordinator: {}", e)),
         }
     }
 
@@ -466,26 +468,27 @@ impl Broker {
 
     pub async fn fetch_offset(&self, request: FetchOffsetRequest) -> Result<Option<i64>> {
         let group_id = request.group_id.clone();
-        if let Some(coordinator_tx) = self.coordinators.get(&group_id) {
-            let (response_tx, response_rx) = oneshot::channel();
+        let coordinator_tx = match self.coordinators.get(&group_id) {
+            Some(tx) => tx.clone(), 
+            None => return Err(anyhow::anyhow!("Coordinator not found for group: {}", group_id)),
+        };
 
-            let command = CoordinatorCommand::FetchOffset {
-                request,
-                response_tx,
-            };
+        let (response_tx, response_rx) = oneshot::channel();
 
-            if coordinator_tx.send(command).await.is_err() {
-                self.coordinators.remove(&group_id);
-                return Err(anyhow::anyhow!("Failed to send fetch offset command to coordinator: {}", group_id));
-            }
+        let command = CoordinatorCommand::FetchOffset {
+            request,
+            response_tx,
+        };
 
-            match response_rx.await {
-                Ok(Ok(offset)) => Ok(offset),
-                Ok(Err(e)) => Err(anyhow::anyhow!("Failed to fetch offset: {}", e)),
-                Err(e) => Err(anyhow::anyhow!("Failed to fetch offset: {}", e)),
-            }
-        } else {
-            Ok(None)
+        if coordinator_tx.send(command).await.is_err() {
+            self.coordinators.remove(&group_id);
+            return Err(anyhow::anyhow!("Failed to send fetch offset command to coordinator: {}", group_id));
+        }
+
+        match response_rx.await {
+            Ok(Ok(offset)) => Ok(offset),
+            Ok(Err(e)) => Err(anyhow::anyhow!("Failed to fetch offset: {}", e)),
+            Err(e) => Err(anyhow::anyhow!("Failed to fetch offset: {}", e)),
         }
     }
 
@@ -494,27 +497,29 @@ impl Broker {
         request: SyncGroupRequest
     ) -> Result<SyncGroupResult> {
         let group_id = request.group_id.clone();
-        if let Some(coordinator_tx) = self.coordinators.get(&group_id) {
-            let (response_tx, response_rx) = oneshot::channel();
+        let coordinator_tx = match self.coordinators.get(&group_id) {
+            Some(tx) => tx.clone(), 
+            None => return Err(anyhow::anyhow!("Coordinator not found for group: {}", group_id)),
+        };
 
-            let command = CoordinatorCommand::SyncGroup {
-                request,
-                response_tx,
-            };
+        let (response_tx, response_rx) = oneshot::channel();
 
-            if coordinator_tx.send(command).await.is_err() {
-                self.coordinators.remove(&group_id);
-                return Err(anyhow::anyhow!("Failed to send sync group command to coordinator: {}", group_id));
-            }
+        let command = CoordinatorCommand::SyncGroup {
+            request,
+            response_tx,
+        };
 
-            match response_rx.await {
-                Ok(Ok(result)) => Ok(result),
-                Ok(Err(e)) => Err(anyhow::anyhow!("Failed to sync group: {}", e)),
-                Err(e) => Err(anyhow::anyhow!("Failed to sync group: {}", e)),
-            }
-        } else {
-            Err(anyhow::anyhow!("Coordinator not found for group: {}", group_id))
+        if coordinator_tx.send(command).await.is_err() {
+            self.coordinators.remove(&group_id);
+            return Err(anyhow::anyhow!("Failed to send sync group command to coordinator: {}", group_id));
         }
+
+        match response_rx.await {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(e)) => Err(anyhow::Error::new(e)),
+            Err(e) => Err(anyhow::Error::new(e)),
+        }
+
     }
 
     async fn persist_offset(&self, metadata: &OffsetCommitMetadata) -> Result<()> {
