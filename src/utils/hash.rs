@@ -5,6 +5,8 @@ use std::collections::hash_map::DefaultHasher;
 ///
 /// # Example
 /// ```
+/// use aeon::utils::hash::calculate_hash;
+///
 /// let value = "hello";
 /// let hash = calculate_hash(&value);
 /// println!("Hash: {}", hash);

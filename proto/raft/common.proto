@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package raft;
+
+enum GroupKind {
+  GROUP_KIND_UNSPECIFIED = 0;
+  GROUP_KIND_META = 1;
+  GROUP_KIND_DATA = 2;
+}
+
+message GroupSpec {
+  uint64 group_id = 1;
+  GroupKind kind = 2;
+  repeated uint64 members = 3;
+}
+
+message HardState {
+  uint64 current_term = 1;
+  uint64 voted_for = 2;
+  bool has_voted_for = 3;
+  uint64 commit_index = 4;
+}
+
+message Entry {
+  uint64 term = 1;
+  uint64 index = 2;
+  bytes payload = 3;
+}
+
+message SnapshotMeta {
+  uint64 last_included_index = 1;
+  uint64 last_included_term = 2;
+}
+
+message SnapshotData {
+  SnapshotMeta meta = 1;
+  bytes data = 2;
+}
+
+message AppendEntriesRequest {
+  uint64 group_id = 1;
+  uint64 term = 2;
+  uint64 leader_id = 3;
+  uint64 prev_log_index = 4;
+  uint64 prev_log_term = 5;
+  repeated Entry entries = 6;
+  uint64 leader_commit = 7;
+}
+
+message AppendEntriesResponse {
+  uint64 term = 1;
+  bool success = 2;
+  uint64 match_index = 3;
+}
+
+message VoteRequest {
+  uint64 group_id = 1;
+  uint64 term = 2;
+  uint64 candidate_id = 3;
+  uint64 last_log_index = 4;
+  uint64 last_log_term = 5;
+}
+
+message VoteResponse {
+  uint64 term = 1;
+  bool vote_granted = 2;
+}
+
+message InstallSnapshotRequest {
+  uint64 group_id = 1;
+  uint64 term = 2;
+  uint64 leader_id = 3;
+  SnapshotData snapshot = 4;
+}
+
+message InstallSnapshotResponse {
+  uint64 term = 1;
+  bool accepted = 2;
+}
+

@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package raft;
+
+message TopicPartition {
+  string topic = 1;
+  uint32 partition = 2;
+}
+
+message AppendBatchCommand {
+  TopicPartition tp = 1;
+  bytes payload = 2;
+  uint32 record_count = 3;
+}
+
+message CommitOffsetCommand {
+  string group_id = 1;
+  TopicPartition tp = 2;
+  int64 offset = 3;
+  int64 ts = 4;
+}
+
+message DataCommand {
+  oneof cmd {
+    AppendBatchCommand append_batch = 1;
+    CommitOffsetCommand commit_offset = 2;
+  }
+}
+

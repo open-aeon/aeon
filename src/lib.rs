@@ -6,6 +6,7 @@ pub mod kafka;
 pub mod coordinator;
 pub mod server;
 pub mod storage;
+pub mod raft;
 pub mod utils;
 
 pub use aeon_protocol_macro;

@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package raft;
+
+import "raft/common.proto";
+import "raft/meta.proto";
+import "raft/data.proto";
+
+service RaftRpc {
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+  rpc Vote(VoteRequest) returns (VoteResponse);
+  rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
+}
+
+message ProposeRequest {
+  uint64 group_id = 1;
+  oneof cmd {
+    MetaCommand meta = 2;
+    DataCommand data = 3;
+    bytes raw = 4;
+  }
+}
+
+message ProposeResponse {
+  uint64 committed_index = 1;
+  string error = 2;
+}
+

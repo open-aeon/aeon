@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package raft;
+
+message RegisterBrokerCommand {
+  uint64 node_id = 1;
+  string addr = 2;
+}
+
+message CreateTopicCommand {
+  string name = 1;
+  uint32 partitions = 2;
+}
+
+message AssignPartitionCommand {
+  string topic = 1;
+  uint32 partition = 2;
+  uint64 group_id = 3;
+  repeated uint64 replicas = 4;
+}
+
+message MetaCommand {
+  oneof cmd {
+    RegisterBrokerCommand register_broker = 1;
+    CreateTopicCommand create_topic = 2;
+    AssignPartitionCommand assign_partition = 3;
+  }
+}
+

@@ -24,6 +24,13 @@ use crate::kafka::message::RecordBatch;
 use crate::kafka::offsets::{OffsetKey, OffsetValue};
 use crate::kafka::codec::Encode;
 use crate::utils::hash::calculate_hash;
+use crate::raft::core::{CoreRaftManager, LocalRaftTransport};
+use crate::raft::fsm::meta_fsm::{MetaCommand, MetaFsm};
+use crate::raft::fsm::StateMachine;
+use crate::raft::manager::RaftManager;
+use crate::raft::types::{GroupKind, GroupSpec, RaftCommand, RaftError};
+
+const META_GROUP_ID: u64 = 1;
 
 pub struct Broker {
     pub config: Arc<BrokerConfig>,
@@ -32,6 +39,8 @@ pub struct Broker {
     metadata: BrokerMetadata,
     shutdown_tx: Arc<Mutex<Option<tokio::sync::watch::Sender<()>>>>,
     coordinators: DashMap<String, mpsc::Sender<CoordinatorCommand>>,
+    raft_manager: Arc<CoreRaftManager>,
+    meta_fsm: Arc<Mutex<MetaFsm>>,
 }
 
 #[derive(Clone)]
@@ -42,6 +51,14 @@ pub struct BrokerMetadata {
 }
 
 impl Broker {
+    async fn meta_read_barrier(&self) -> Result<()> {
+        match self.raft_manager.read_index(META_GROUP_ID).await {
+            Ok(_) => Ok(()),
+            Err(RaftError::GroupNotFound(_)) => Ok(()),
+            Err(e) => Err(anyhow::anyhow!("meta read barrier failed: {e}")),
+        }
+    }
+
     pub fn new(config: BrokerConfig, storage_config: StorageConfig) -> Self {
         let topics = Arc::new(RwLock::new(HashMap::new()));
         let metadata = BrokerMetadata {
@@ -49,6 +66,18 @@ impl Broker {
             host: config.advertised_host.clone(),
             port: config.advertised_port,
         };
+        let raft_transport = LocalRaftTransport::new();
+        let raft_dir = config.data_dir.join("_raft").join(format!("node_{}", config.id));
+        let raft_manager = CoreRaftManager::with_durable_dir(
+            config.id as u64,
+            raft_transport.clone(),
+            &raft_dir,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("[raft] init durable store failed, fallback to memory: {e}");
+            CoreRaftManager::with_memory(config.id as u64, raft_transport.clone())
+        });
+        raft_transport.register_handler(config.id as u64, raft_manager.clone());
         Self { 
             config: Arc::new(config),
             storage_config: Arc::new(storage_config), 
@@ -56,6 +85,8 @@ impl Broker {
             metadata: metadata,
             shutdown_tx: Arc::new(Mutex::new(None)),
             coordinators: DashMap::new(),
+            raft_manager,
+            meta_fsm: Arc::new(Mutex::new(MetaFsm::default())),
         }
     }
 
@@ -68,6 +99,15 @@ impl Broker {
         .with_context(|| format!("Failed to create data directory at {:?}", data_dir))?;
 
         println!("Starting broker, data directory at: {:?}", data_dir);
+
+        self.raft_manager
+            .create_group(GroupSpec {
+                group_id: META_GROUP_ID,
+                kind: GroupKind::Meta,
+                members: vec![self.config.id as u64],
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("create meta raft group failed: {e}"))?;
 
         let mut local_topics = HashMap::new();
 
@@ -219,6 +259,33 @@ impl Broker {
             return Err(anyhow::anyhow!("Topic already exists: {}", name));
         }
 
+        let cmd = MetaCommand::CreateTopic {
+            name: name.clone(),
+            partitions: p_num,
+        };
+        let payload = bincode::serialize(&cmd)
+            .map_err(|e| anyhow::anyhow!("encode meta command failed: {e}"))?;
+        let committed_index = self
+            .raft_manager
+            .propose(META_GROUP_ID, RaftCommand::Meta(payload))
+            .await
+            .map_err(|e| anyhow::anyhow!("raft propose create topic failed: {e}"))?;
+
+        self.meta_fsm
+            .lock()
+            .await
+            .apply(committed_index, cmd)
+            .await
+            .map_err(|e| anyhow::anyhow!("meta fsm apply failed: {e}"))?;
+
+        self.create_topic_local(name, p_num).await
+    }
+
+    async fn create_topic_local(&self, name: String, p_num: u32) -> Result<()> {
+        if self.topics.read().await.contains_key(&name) {
+            return Err(anyhow::anyhow!("Topic already exists: {}", name));
+        }
+
         let engine = self.storage_config.engine;
         let path = self.config.data_dir.join(&name);
         // todo: potential race condition here, to be fixed
@@ -289,6 +356,7 @@ impl Broker {
     }
 
     pub async fn get_topics_metadata(&self, topics: &[String]) -> Result<HashMap<String, TopicMetadata>> {
+        self.meta_read_barrier().await?;
         let all_topics = self.topics.read().await;
         let mut meta = HashMap::new();
         for topic_name in topics {
@@ -300,6 +368,7 @@ impl Broker {
     }
 
     pub async fn get_all_topics_metadata(&self) -> Result<HashMap<String, TopicMetadata>> {
+        self.meta_read_barrier().await?;
         let topics = self.topics.read().await;
         let mut meta = HashMap::new();
         for (name, topic) in topics.iter() {
