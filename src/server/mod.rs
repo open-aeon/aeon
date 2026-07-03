@@ -1,10 +1,11 @@
 mod handler;
 mod codec;
 
+pub use codec::ServerCodec;
+
 use crate::broker::Broker;
 use crate::config::ServerConfig;
 use crate::kafka::Request;
-use crate::server::codec::ServerCodec;
 use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use std::net::SocketAddr;

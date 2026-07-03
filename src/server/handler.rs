@@ -8,12 +8,13 @@ use crate::coordinator::CommitOffsetTp;
 use crate::error::protocol::ProtocolError;
 use crate::error::storage::StorageError;
 use crate::common::metadata::TopicPartition;
+use crate::kafka::compat;
+use crate::kafka::errors;
 use crate::kafka::protocol::*;
 use crate::kafka::{Request, RequestType, Response, ResponseHeader, ResponseType};
 use crate::utils::hash::calculate_hash;
 use crate::error::consumer::ConsumerGroupError;
 
-// todo: broker是否可以换为&Arc<Broker>
 pub async fn handle_request(request: Request, broker: &Broker) -> Result<Response> {
     let correlation_id = request.header.correlation_id;
     let api_key = request.header.api_key;
@@ -47,45 +48,31 @@ fn map_produce_error(e: &anyhow::Error) -> i16 {
     // 2 = CORRUPT_MESSAGE, 17 = INVALID_RECORD, 3 = UNKNOWN_TOPIC_OR_PARTITION
     if let Some(pe) = e.downcast_ref::<ProtocolError>() {
         match pe {
-            ProtocolError::InvalidCrc | ProtocolError::InvalidRecordBatchCrc => 2,
+            ProtocolError::InvalidCrc | ProtocolError::InvalidRecordBatchCrc => errors::CORRUPT_MESSAGE,
             ProtocolError::UnsupportedMagicByte(_)
             | ProtocolError::InvalidRecordBatchFormat
-            | ProtocolError::InvalidRecordBatchField(_) => 17,
-            _ => 17,
+            | ProtocolError::InvalidRecordBatchField(_) => errors::INVALID_RECORD,
+            _ => errors::INVALID_RECORD,
         }
     } else if let Some(se) = e.downcast_ref::<StorageError>() {
         match se {
-            StorageError::DataCorruption => 2,
-            _ => 17,
+            StorageError::DataCorruption => errors::CORRUPT_MESSAGE,
+            _ => errors::INVALID_RECORD,
         }
     } else {
         let msg = e.to_string();
         if msg.contains("Topic not found") || msg.contains("Partition not found") {
-            3
+            errors::UNKNOWN_TOPIC_OR_PARTITION
         } else if msg.contains("Record count mismatch") {
-            17
+            errors::INVALID_RECORD
         } else {
-            17
+            errors::INVALID_RECORD
         }
     }
 }
 
 async fn handle_api_versions(_req: &ApiVersionsRequest, _broker: &Broker, api_version: i16) -> Result<ResponseType> {
-    let supported_keys = vec![
-        ApiVersion { api_key: 0, min_version: 3, max_version: 9, ..Default::default() },  // Produce
-        ApiVersion { api_key: 1, min_version: 4, max_version: 12, ..Default::default() }, // Fetch
-        ApiVersion { api_key: 2, min_version: 1, max_version: 10, ..Default::default() }, // ListOffsets
-        ApiVersion { api_key: 3, min_version: 0, max_version: 12, ..Default::default() }, // Metadata
-        ApiVersion { api_key: 8, min_version: 2, max_version: 10, ..Default::default() }, // OffsetCommit
-        ApiVersion { api_key: 9, min_version: 1, max_version: 10, ..Default::default() }, // OffsetFetch
-        ApiVersion { api_key: 10, min_version: 0, max_version: 4, ..Default::default() }, // FindCoordinator
-        ApiVersion { api_key: 11, min_version: 0, max_version: 9, ..Default::default() }, // JoinGroup
-        ApiVersion { api_key: 12, min_version: 0, max_version: 4, ..Default::default() }, // Heartbeat
-        ApiVersion { api_key: 13, min_version: 0, max_version: 5, ..Default::default() }, // LeaveGroup
-        ApiVersion { api_key: 14, min_version: 0, max_version: 5, ..Default::default() }, // SyncGroup
-        ApiVersion { api_key: 18, min_version: 0, max_version: 3, ..Default::default() }, // ApiVersions
-        ApiVersion { api_key: 19, min_version: 2, max_version: 7, ..Default::default() }, // CreateTopics
-    ];
+    let supported_keys = compat::api_versions();
     let response = if api_version >= 3 {
         ApiVersionsResponse {
             error_code: 0,
@@ -112,11 +99,11 @@ async fn handle_create_topics(req: &CreateTopicsRequest, broker: &Broker, api_ve
 
     for topic in &req.topics {
         let name = topic.name.clone();
-        // 仅支持自动分区数：优先使用请求的 NumPartitions > 0，否则用默认 1；忽略 ReplicationFactor/Assignments/Configs
+        // only support automatic partition number: use requested NumPartitions > 0, otherwise use default 1; ignore ReplicationFactor/Assignments/Configs
         let num_partitions = if topic.num_partitions > 0 { topic.num_partitions as u32 } else { 1 };
 
         if req.validate_only {
-            // 仅校验：返回成功但不真正创建
+            // only validate: return success but not actually create
             results.push(CreatableTopicResult {
                 name,
                 topic_id: if api_version >= 7 { 0u128 } else { Default::default() },
@@ -145,7 +132,6 @@ async fn handle_create_topics(req: &CreateTopicsRequest, broker: &Broker, api_ve
                 });
             }
             Err(e) => {
-                // 36 = INVALID_REPLICATION_FACTOR; 41 = INVALID_PARTITIONS; 3 = UNKNOWN_TOPIC_OR_PARTITION;  Topic already exists -> 36? 实际应为 36? Kafka 用 36? 这里使用 36 不合适，应该用 36 for RF，37 for INVALID_REPLICA_ASSIGNMENT， 3 for UNKNOWN_TOPIC_OR_PARTITION， 36不是合适。对于已存在，用 36? 实际 Kafka 用 36? 正确是 36? 这里用 36 占位，简单化:
                 let msg = e.to_string();
                 let code = if msg.contains("already exists") { 36i16 } else { 41i16 };
                 results.push(CreatableTopicResult {
@@ -437,8 +423,8 @@ async fn handle_fetch(req: &FetchRequest, broker: &Broker) -> Result<ResponseTyp
 }
 
 async fn handle_list_offsets(req: &ListOffsetsRequest, broker: &Broker) -> Result<ResponseType> {
-    // 语义：ListOffsets v1+，每个分区只返回一个 offset
-    // Timestamp 约定：-2=earliest, -1=latest，其它时间戳暂返回 OFFSET_NOT_AVAILABLE(103)
+    // semantic: ListOffsets v1+, each partition only returns one offset
+    // Timestamp convention: -2=earliest, -1=latest, other timestamps return OFFSET_NOT_AVAILABLE(103)
     let mut topic_responses: Vec<ListOffsetsTopicResponse> = Vec::with_capacity(req.topics.len());
     for t in &req.topics {
         let mut part_responses: Vec<ListOffsetsPartitionResponse> = Vec::with_capacity(t.partitions.len());
@@ -463,7 +449,7 @@ async fn handle_list_offsets(req: &ListOffsetsRequest, broker: &Broker) -> Resul
                     }
                 }
             } else {
-                // 暂不实现按时间戳查找，返回 OFFSET_NOT_AVAILABLE(103)
+                // todo: implement search by timestamp
                 (103i16, p.timestamp, -1i64, p.current_leader_epoch)
             };
 
@@ -487,9 +473,9 @@ async fn handle_find_coordinator(req: &FindCoordinatorRequest, broker: &Broker, 
     let broker_meta = broker.metadata();
 
     if api_version >= 4 {
-        // --- 版本 v4+ (使用 coordinator_keys 数组) ---
+        // --- version v4+ (using coordinator_keys array) ---
         let mut coordinators: Vec<Coordinator> = Vec::new();
-        let key_type = req.key_type; // 从顶层字段获取 key_type
+        let key_type = req.key_type; // get key_type from top level field
 
         for key_str in &req.coordinator_keys {
             let mut coordinator = Coordinator {
@@ -503,7 +489,7 @@ async fn handle_find_coordinator(req: &FindCoordinatorRequest, broker: &Broker, 
             };
 
             if key_type == 0 { // 0 for GROUP
-                // --- 哈希计算逻辑 ---
+                // --- hash calculation logic ---
                 let offsets_topic_partitions = broker.config.internal_topic_partitions as u64;
                 let partition_index = if offsets_topic_partitions > 0 {
                     calculate_hash(key_str) % offsets_topic_partitions
@@ -511,7 +497,7 @@ async fn handle_find_coordinator(req: &FindCoordinatorRequest, broker: &Broker, 
                     0
                 };
                 
-                // 在单节点aeon中，任何分区的Leader都是自己，所以直接返回自身信息
+                // in single node aeon, any partition's leader is itself, so return self information directly
                 coordinator.node_id = broker_meta.id as i32;
                 coordinator.host = broker_meta.host.clone();
                 coordinator.port = broker_meta.port as i32;
@@ -521,7 +507,7 @@ async fn handle_find_coordinator(req: &FindCoordinatorRequest, broker: &Broker, 
                     key_str, partition_index, broker_meta.host, broker_meta.port
                 );
 
-            } else { // 其他不支持的 key_type
+            } else { // other unsupported key_type
                 println!("[Coordinator] v4+ FindCoordinator for unsupported key_type: {} for key '{}'", key_type, key_str);
                 coordinator.error_code = 33; // COORDINATOR_NOT_AVAILABLE
                 coordinator.error_message = Some("Unsupported key_type".to_string());
@@ -537,9 +523,9 @@ async fn handle_find_coordinator(req: &FindCoordinatorRequest, broker: &Broker, 
         return Ok(ResponseType::FindCoordinator(response));
 
     } else {
-        // --- 版本 v0, v1, v2, v3 (使用单个 key) ---
+        // --- version v0, v1, v2, v3 (using single key) ---
         let key_str = &req.key;
-        let key_type = req.key_type; // 对于 v0, 这个值会是默认的 0
+        let key_type = req.key_type; // for v0, this value will be 0
 
         let mut response_node_id = -1;
         let mut response_host = String::new();
@@ -547,7 +533,7 @@ async fn handle_find_coordinator(req: &FindCoordinatorRequest, broker: &Broker, 
         let mut response_error_code = 0i16;
 
         if key_type == 0 { // GROUP
-            // --- 哈希计算逻辑 ---
+            // --- hash calculation logic ---
             let offsets_topic_partitions = broker.config.internal_topic_partitions as u64;
             let partition_index = if offsets_topic_partitions > 0 {
                 calculate_hash(key_str) % offsets_topic_partitions
@@ -555,7 +541,7 @@ async fn handle_find_coordinator(req: &FindCoordinatorRequest, broker: &Broker, 
                 0
             };
 
-            // 在单节点aeon中，任何分区的Leader都是自己
+            // in single node aeon, any partition's leader is itself
             response_node_id = broker_meta.id as i32;
             response_host = broker_meta.host.clone();
             response_port = broker_meta.port as i32;
@@ -583,9 +569,9 @@ async fn handle_find_coordinator(req: &FindCoordinatorRequest, broker: &Broker, 
 async fn handle_join_group(req: &JoinGroupRequest, broker: &Broker) -> Result<ResponseType> {
     use crate::coordinator as coord;
 
-    // v4+ 两步 Join：若 member_id 为空，先返回 MEMBER_ID_REQUIRED 并下发分配的 member_id
+    // v4+ two step Join: if member_id is empty, first return MEMBER_ID_REQUIRED and send the assigned member_id
     if req.member_id.is_empty() {
-        // 79 = MEMBER_ID_REQUIRED（Kafka 标准错误码）
+        // 79 = MEMBER_ID_REQUIRED (Kafka standard error code)
         let assigned = format!("aeon-{}", uuid::Uuid::new_v4());
         let resp = JoinGroupResponse {
             throttle_time_ms: 0,
@@ -604,7 +590,7 @@ async fn handle_join_group(req: &JoinGroupRequest, broker: &Broker) -> Result<Re
 
     let member_id = req.member_id.clone();
 
-    // 2) 计算超时：rebalance_timeout_ms 缺省时使用 session_timeout_ms
+    // 2) calculate timeout: use session_timeout_ms if rebalance_timeout_ms is not set
     let session_timeout_ms = req.session_timeout_ms.max(0) as u64;
     let rebalance_timeout_ms = if req.rebalance_timeout_ms <= 0 {
         session_timeout_ms
@@ -612,21 +598,21 @@ async fn handle_join_group(req: &JoinGroupRequest, broker: &Broker) -> Result<Re
         req.rebalance_timeout_ms as u64
     };
 
-    // 3) 协议与元数据
+    // 3) protocol and metadata
     let supported_protocols: Vec<(String, Vec<u8>)> = req
         .protocols
         .iter()
         .map(|p| (p.name.clone(), p.metadata.to_vec()))
         .collect();
 
-    // 4) 发送到组协调器
+    // 4) send to group coordinator
     let join_req = coord::JoinGroupRequest {
         group_id: req.group_id.clone(),
         member_id: member_id.clone(),
         group_instance_id: req.group_instance_id.clone(),
         session_timeout: session_timeout_ms,
         rebalance_timeout: rebalance_timeout_ms,
-        topics: vec![], // 订阅主题由协议元数据/SyncGroup 阶段处理
+        topics: vec![], // subscribed topics are handled by protocol metadata/SyncGroup phase
         supported_protocols,
     };
 
@@ -636,7 +622,7 @@ async fn handle_join_group(req: &JoinGroupRequest, broker: &Broker) -> Result<Re
     }
 
     let result = result.unwrap();
-    // 5) 构造响应（按版本，过程宏会处理可用字段）
+    // 5) construct response (based on version, process macro will handle available fields)
     let members: Vec<JoinGroupResponseMember> = result
         .members
         .into_iter()
@@ -778,7 +764,7 @@ async fn handle_sync_group(req: &SyncGroupRequest, broker: &Broker) -> Result<Re
 }
 
 async fn handle_offset_fetch(req: &OffsetFetchRequest, broker: &Broker) -> Result<ResponseType> {
-    // 兼容 v1-7（单组 + topics 字段）与 v8+（groups 数组）。编码器会根据响应版本选择正确字段。
+    // compatible with v1-7 (single group + topics field) and v8+ (groups array). The encoder will select the correct fields based on the response version.
     // 情况一：v8+，请求包含 groups 数组
     if !req.groups.is_empty() {
         let mut groups_resp: Vec<OffsetFetchResponseGroup> = Vec::with_capacity(req.groups.len());
@@ -786,7 +772,7 @@ async fn handle_offset_fetch(req: &OffsetFetchRequest, broker: &Broker) -> Resul
             let mut topics_resp: Vec<OffsetFetchResponseTopics> = Vec::new();
             if let Some(topics) = &g.topics {
                 for t in topics {
-                    // 仅支持通过名称查询（v8-9）。若为 v10 TopicId，我们暂不支持并跳过。
+                    // only support query by name (v8-9). If v10 TopicId, we don't support it and skip.
                     {
                         let topic_name = t.name.clone();
                         let mut partitions_resp: Vec<OffsetFetchResponsePartitions> = Vec::with_capacity(t.partition_indexes.len());
@@ -829,7 +815,7 @@ async fn handle_offset_fetch(req: &OffsetFetchRequest, broker: &Broker) -> Resul
         return Ok(ResponseType::OffsetFetch(response));
     }
 
-    // 情况二：v1-7，单组 + topics 字段
+    // case two: v1-7, single group + topics field
     let mut topics_resp: Vec<OffsetFetchResponseTopic> = Vec::new();
     if let Some(topics) = &req.topics {
         for t in topics {

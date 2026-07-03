@@ -47,7 +47,7 @@ impl LogStorage for MmapLogStorage {
         let log_clone = self.log.clone();
         let val = tokio::task::spawn_blocking(move || {
             let log = log_clone.lock().expect("Fail to lock log");
-            // earliest = 第一个 segment 的 base_offset
+            // earliest = base offset of the first segment
             log.segments.keys().next().copied().ok_or_else(|| anyhow!("Empty log"))
         }).await??;
         Ok(val)
@@ -203,19 +203,19 @@ impl MmapLog {
     }
 
     pub fn truncate(&mut self, offset: u64) -> Result<()> {
-        // 找到第一个base_offset >= offset 的 segment
+        // find the first segment with base_offset >= offset
         let mut found = false;
         let mut to_delete: Vec<u64> = Vec::new();
         let mut to_truncate: Option<u64> = None;
 
         for (&base_offset, _) in self.segments.range(offset..) {
-            // 第一个 >= offset 的 segment
+            // the first segment >= offset
             to_truncate = Some(base_offset);
             found = true;
             break;
         }
 
-        // 收集所有 base_offset > offset 的 segment
+        // collect all segments with base_offset > offset
         for (&base_offset, _) in self.segments.range((offset + 1)..) {
             to_delete.push(base_offset);
         }
@@ -224,14 +224,14 @@ impl MmapLog {
             return Err(StorageError::InvalidOffset.into());
         }
 
-        // truncate 第一个 >= offset 的 segment
+        // truncate the first segment >= offset
         if let Some(base_offset) = to_truncate {
             if let Some(segment) = self.segments.get_mut(&base_offset) {
                 segment.truncate(offset)?;
             }
         }
 
-        // 删除所有 base_offset > offset 的 segment
+        // delete all segments with base_offset > offset
         for base_offset in to_delete {
             if let Some(segment) = self.segments.remove(&base_offset) {
                 segment.delete()?;

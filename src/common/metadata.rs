@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// 主题分区信息
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TopicPartition {
     pub topic: String,
@@ -15,7 +14,6 @@ pub struct TopicPartitionOffset {
     pub offset: i64,
 }
 
-/// 主题元数据信息
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TopicMetadata {
     pub name: String,

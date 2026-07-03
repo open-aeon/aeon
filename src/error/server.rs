@@ -2,18 +2,18 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ServerError {
-    #[error("连接错误: {0}")]
+    #[error("Connection Fail: {0}")]
     Connection(String),
     
-    #[error("连接池已满")]
+    #[error("Connection Pool Full")]
     ConnectionPoolFull,
     
-    #[error("连接超时")]
+    #[error("Connection Timeout")]
     ConnectionTimeout,
     
-    #[error("无效的连接状态")]
+    #[error("Invalid Connection State")]
     InvalidConnectionState,
     
-    #[error("其他错误: {0}")]
+    #[error("Other error: {0}")]
     Other(String),
 } 

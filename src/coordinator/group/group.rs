@@ -14,7 +14,7 @@ pub struct ConsumerGroup {
     pub name: String,
     pub state: GroupState,
     members: HashMap<String, ConsumerMember>,
-    offsets: HashMap<TopicPartition, i64>, //todo: 是否保留？
+    offsets: HashMap<TopicPartition, i64>,
     protocol: Option<String>,
     generation_id: u32,
     leader_id: Option<String>,

@@ -1,4 +1,5 @@
 pub mod codec;
+pub mod compat;
 pub mod message;
 pub mod protocol;
 pub mod offsets;
@@ -19,29 +20,8 @@ pub struct RequestHeader {
     pub client_id: Option<String>,
 }
 
-fn is_flexible_version(api_key: i16, api_version: i16) -> bool {
-    match api_key {
-        18 => api_version >= 3, // ApiVersions
-        0  => api_version >= 9,  // Produce
-        1 => api_version >= 12,  // Fetch
-        2 => api_version >= 6,   // ListOffsets
-        3  => api_version >= 9,  // Metadata
-        19 => api_version >= 5,  // CreateTopics
-        8  => api_version >= 8, // OffsetCommit
-        9  => api_version >= 6, // OffsetFetch
-        10 => api_version >= 3, // FindCoordinator
-        11 => api_version >= 6, // JoinGroup
-        12 => api_version >= 4, // Heartbeat
-        13 => api_version >= 4, // LeaveGroup
-        14 => api_version >= 4, // SyncGroup
-        _ => false, // Default to non-flexible for unknown keys
-    }
-}
-
 impl RequestHeader {
     pub fn decode_header(buf: &mut impl Buf) -> Result<Self> {
-        // 打印当前缓冲区的字节内容，便于调试
-        // println!("[DEBUG] decode_header 原始字节: {:?}", buf.chunk());
         let api_key = i16::decode(buf, 0)?;
         let api_version = i16::decode(buf, 0)?;
         let correlation_id = i32::decode(buf, 0)?;
@@ -63,7 +43,7 @@ impl RequestHeader {
             })?)
         };
 
-        if is_flexible_version(api_key, api_version) {
+        if compat::is_flexible_version(api_key, api_version) {
             // Flexible header: tagged fields are encoded as COUNT followed by COUNT*(tag,size,value)
             let tagged_fields_count = u32::decode_varint(buf)?;
             for _ in 0..tagged_fields_count {
@@ -93,7 +73,7 @@ impl Encode for RequestHeader {
         self.api_key.encode(buf, api_version)?;
         self.api_version.encode(buf, api_version)?;
         self.correlation_id.encode(buf, api_version)?;
-        if is_flexible_version(self.api_key, self.api_version) {
+        if compat::is_flexible_version(self.api_key, self.api_version) {
             CompactNullableString(self.client_id.clone()).encode(buf, api_version)?;
             0u32.encode_varint(buf);
         } else {
@@ -140,21 +120,7 @@ pub struct ResponseHeader {
 
 impl ResponseHeader {
     fn should_use_flexible_header(api_key: i16, api_version: i16) -> bool {
-        match api_key {
-            0  => api_version >= 9,  // Produce v9+ is flexible
-            1  => api_version >= 12,  // Fetch v12+ is flexible
-            2  => api_version >= 6,   // ListOffsets v6+ is flexible
-            3  => api_version >= 9,  // Metadata v9+ is flexible
-            8  => api_version >= 8,   // OffsetCommit
-            9 => api_version >= 6,    // OffsetFetch v6+ is flexible
-            10 => api_version >= 3,   // FindCoordinator v3+ is flexible
-            11 => api_version >= 6,   // JoinGroup v6+ is flexible
-            12 => api_version >= 4,   // Heartbeat
-            13 => api_version >= 4,   // LeaveGroup
-            14 => api_version >= 4,   // SyncGroup v4+ is flexible
-            19 => api_version >= 5,   // CreateTopics v5+ is flexible
-            _ => false,
-        }
+        compat::is_flexible_version(api_key, api_version)
     }
     
     pub fn encode_with_version(&self, buf: &mut impl BufMut, api_key: i16, api_version: i16) -> Result<()> {

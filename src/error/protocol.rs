@@ -11,7 +11,10 @@ pub enum ProtocolError {
 
     #[error("Unknown API key: {0}")]
     UnknownApiKey(i16),
-    
+
+    #[error("Unsupported API version {version} for API key {api_key}")]
+    UnsupportedApiVersion { api_key: i16, version: i16 },
+
     #[error("API key mismatch")]
     ApiKeyMismatch,
 

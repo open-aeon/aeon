@@ -119,7 +119,7 @@ impl LogSegment {
         let mut buf = [0u8; 8];
         let mut in_memory_index: Vec<(u64, u32)> = Vec::new();
         while let Ok(()) = index_reader.read_exact(&mut buf) {
-            // delta 表示该索引项对应的 base_offset 与 segment 起始 base_offset 的差值（即 base_offset - segment_base_offset），用于节省索引空间
+            // delta represents the difference between the base offset of the index item and the base offset of the segment (i.e. base_offset - segment_base_offset), used to save index space
             let delta = u32::from_le_bytes(buf[0..4].try_into().unwrap());
             let physical_position = u32::from_le_bytes(buf[4..8].try_into().unwrap());
             let base_off = base_offset + delta as u64;
@@ -144,14 +144,14 @@ impl LogSegment {
                 if batch_len == 0 || pos + 12 + batch_len > log_file_metadata.len() as usize {
                     should_rebuild_index_from_start = true;
                 } else {
-                    // 校验索引条目与日志真实内容是否一致；不一致则重建索引。
+                    // check if the index item matches the real content of the log; if not, rebuild the index.
                     let base_bytes: [u8; 8] = mmap[pos..pos + 8].try_into().unwrap();
                     let on_disk_base = u64::from_be_bytes(base_bytes);
                     if on_disk_base != last_indexed_base {
                         should_rebuild_index_from_start = true;
                     } else {
                         position = pos + 12 + batch_len;
-                        // RecordBatch.records_count 位于 [57..61]；解析失败时按 1 条记录兜底。
+                        // RecordBatch.records_count is located in [57..61]; fallback to 1 record if parsing fails.
                         let indexed_batch_records = if pos + 61 <= log_file_metadata.len() as usize {
                             let rc_bytes: [u8; 4] = mmap[pos + 57..pos + 61].try_into().unwrap();
                             let rc = i32::from_be_bytes(rc_bytes);
@@ -176,7 +176,7 @@ impl LogSegment {
             }
         }
 
-        // 扫描剩余的 RecordBatch，重建索引
+        // scan remaining RecordBatch, rebuild index
         while position < log_file_size as usize {
             if position + 12 > log_file_size as usize {
                 break;
@@ -184,11 +184,11 @@ impl LogSegment {
             
             let current_batch_physical_pos = position as usize;
             
-            // 读取 RecordBatch 长度（第 8-12 字节，大端序）
+            // read RecordBatch length (8-12 bytes, big endian)
             let batch_len_bytes: [u8; 4] = mmap[position + 8..position + 12].try_into().unwrap();
             let batch_len = u32::from_be_bytes(batch_len_bytes) as usize;
             
-            // 验证 batch 完整性
+            // verify batch completeness
             if batch_len == 0 || position + 12 + batch_len > log_file_size as usize {
                 break;
             }
@@ -204,9 +204,9 @@ impl LogSegment {
                 1
             };
 
-            // 根据索引间隔决定是否创建索引条目
+            // decide whether to create index item based on index interval
             if bytes_since_last_index >= index_interval_bytes || record_count == 0 {
-                // 读取该批 base_offset
+                // read the batch base_offset
                 let base_bytes: [u8; 8] = mmap[current_batch_physical_pos..current_batch_physical_pos + 8].try_into().unwrap();
                 let batch_base = u64::from_be_bytes(base_bytes);
                 let delta = (batch_base - base_offset) as u32;
@@ -288,21 +288,21 @@ impl LogSegment {
             return Ok(self.base_offset + self.record_count);
         }
 
-        // 分配 base_offset = 当前分区下一条记录的绝对偏移
+        // assign base_offset = absolute offset of the next record in the current partition
         let assigned_base_offset: u64 = self.base_offset + self.record_count;
 
         let total_len = data.len();
         
-        // 检查是否需要扩展文件
+        // check if file needs to be extended
         if self.position + total_len > self.mmap.len() {
             self.extend_file(self.position + total_len)?;
         }
 
         let physical_position = self.position as u32;
-        // 先将整批数据拷贝到 mmap
+        // first copy the entire batch to mmap
         let dst_range = self.position..self.position + total_len;
         self.mmap[dst_range].copy_from_slice(&data);
-        // 再覆盖前 8 字节为分配后的 base_offset（不影响 CRC 覆盖范围）
+        // then overwrite the first 8 bytes with the assigned base_offset
         let base_be = assigned_base_offset.to_be_bytes();
         if total_len < 8 { return Err(StorageError::DataCorruption); }
         self.mmap[self.position..self.position + 8].copy_from_slice(&base_be);
@@ -314,7 +314,6 @@ impl LogSegment {
         let last_logical_offset = logical_offset;
 
         if self.bytes_since_last_index >= self.index_interval_bytes || self.record_count == 0 {
-            // 读取该批 base_offset（我们刚写入了它）
             let pos = self.position - total_len;
             let base_bytes: [u8; 8] = self.mmap[pos..pos+8].try_into().map_err(|_| StorageError::DataCorruption)?;
             let batch_base = u64::from_be_bytes(base_bytes);
@@ -331,12 +330,12 @@ impl LogSegment {
     }
 
     pub fn read_batch(&self, start_offset: u64, max_bytes: usize) -> Result<Vec<Bytes>, StorageError> {
-        // 先通过稀疏索引定位到起始物理位置
+        // first locate the starting physical position through sparse index
         let start_index = match self.index.binary_search_by_key(&start_offset, |&(base, _)| base) {
             Ok(index) => index,
             Err(index) => {
                 if index == 0 {
-                    // 如果请求的 offset 比索引中的第一个还要小，我们从索引的第一项开始线性扫描
+                    // if the requested offset is smaller than the first item in the index, start linear scanning from the first item
                     0
                 } else {
                     index - 1
@@ -344,7 +343,7 @@ impl LogSegment {
             },
         };
         
-        // 如果索引为空，说明 segment 里没有任何数据
+        // if the index is empty, means the segment has no data
         if self.index.is_empty() {
             return Ok(vec![]);
         }
@@ -353,14 +352,14 @@ impl LogSegment {
         let mut result = Vec::new();
         let mut total_bytes = 0;
 
-        // 向后遍历，直到找到start_offset对应的batch
+        // scan forward until finding the batch corresponding to start_offset
         while current_pos < self.position as u32 {
             let pos = current_pos as usize;
             if pos + 12 > self.position {
                 break;
             }
 
-            // 读取batch头部，batch长度在第8-12字节（即[8..12]，4字节，be）
+            // read batch header, batch length is in 8-12 bytes (i.e. [8..12], 4 bytes, big endian)
             let batch_len_bytes: [u8; 4] = self.mmap[pos + 8..pos + 12].try_into().map_err(|_| StorageError::DataCorruption)?;
             let batch_len = u32::from_be_bytes(batch_len_bytes) as usize;
 
@@ -374,7 +373,7 @@ impl LogSegment {
                 break;
             }
 
-            // 判断该批是否覆盖 start_offset
+            // check if the batch covers start_offset
             let base_bytes: [u8; 8] = self.mmap[pos..pos+8].try_into().map_err(|_| StorageError::DataCorruption)?;
             let batch_base = u64::from_be_bytes(base_bytes);
             let last_delta_bytes: [u8; 4] = self.mmap[pos + 23..pos + 27].try_into().map_err(|_| StorageError::DataCorruption)?;
@@ -386,7 +385,7 @@ impl LogSegment {
                 continue;
             }
 
-            // 读取batch数据
+            // read batch data
             let batch_data = &self.mmap[pos..batch_end];
             if total_bytes + batch_data.len() > max_bytes && !result.is_empty() {
                 break;
@@ -400,29 +399,29 @@ impl LogSegment {
         Ok(result)
     }
 
-    // todo: 预分配与动态增长模式下的不同逻辑
+    // todo: different logic for pre-allocation and dynamic growth mode
     pub fn truncate(&mut self, offset: u64) -> Result<(), StorageError> {
         let base_offset = self.base_offset as u64;
 
         if offset < base_offset {
-            // offset在本segment之前，返回InvalidOffset错误
+            // offset is before this segment, return InvalidOffset error
             return Err(StorageError::InvalidOffset);
         }
 
         let rel_offset = (offset - base_offset) as u32;
 
-        // 二分查找index，找到第一个大于等于rel_offset的位置
+        // binary search index, find the first position greater than or equal to rel_offset
         let idx = match self.index.binary_search_by_key(&rel_offset, |&(base, _)| (base - base_offset) as u32) {
-            Ok(i) => i, // 精确命中
-            Err(i) => i, // 没有精确命中，i为第一个大于rel_offset的位置
+            Ok(i) => i, // exact hit
+            Err(i) => i, // no exact hit, i is the first position greater than rel_offset
         };
 
-        // 如果idx为0，说明所有记录都大于要截断的offset，直接清空
+        // if idx is 0, means all records are greater than the offset to truncate, clear directly
         if idx == 0 {
             self.position = 0;
             self.index.clear();
             self.mmap.flush()?;
-            // 实际截断文件到0大小
+            // actually truncate file to 0 size
             self.log_file.set_len(0)?;
             self.log_file.sync_all()?;
             let new_mmap = unsafe { MmapOptions::new().map_mut(&self.log_file)? };
@@ -432,13 +431,13 @@ impl LogSegment {
             return Ok(());
         }
 
-        // 截断到idx之前的最后一个batch
+        // truncate to the last batch before idx
         let (_logical_offset, physical_pos) = self.index[idx - 1];
         let pos = physical_pos as usize;
 
-        // 读取batch头部，batch长度在第8-12字节（即[8..12]，4字节，大端序）
+        // read batch header, batch length is in 8-12 bytes (i.e. [8..12], 4 bytes, big endian)
         if pos + 12 > self.position {
-            // 数据损坏，无法读取batch长度
+            // data corruption, cannot read batch length
             return Err(StorageError::DataCorruption);
         }
         let batch_len_bytes: [u8; 4] = self.mmap[pos + 8..pos + 12]
@@ -451,7 +450,7 @@ impl LogSegment {
             return Err(StorageError::DataCorruption);
         }
 
-        // 截断mmap文件
+        // truncate mmap file
         self.mmap.flush()?;
         self.log_file.set_len(batch_end as u64)?;
         self.log_file.sync_all()?;
@@ -459,7 +458,7 @@ impl LogSegment {
         let _ = std::mem::replace(&mut self.mmap,new_mmap );
         self.position = batch_end;
 
-        // 截断index
+        // truncate index
         self.index.truncate(idx);
         self.index_file.set_len((idx * 8) as u64)?;
         self.index_file.sync_all()?;

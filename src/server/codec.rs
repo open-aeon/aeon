@@ -4,6 +4,7 @@ use tokio_util::codec::{Decoder, Encoder};
 
 use crate::error::protocol::ProtocolError;
 use crate::kafka::codec::{Decode, Encode};
+use crate::kafka::compat;
 use crate::kafka::{
     protocol::*,
     Request, RequestHeader, RequestType, Response,
@@ -18,7 +19,6 @@ impl Decoder for ServerCodec {
     type Error = std::io::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        // println!("[DEBUG]收到原始字节: {:?}", &src[..]);
         if src.len() < 4 {
             return Ok(None);
         }
@@ -43,9 +43,15 @@ impl Decoder for ServerCodec {
         let header = RequestHeader::decode_header(&mut cursor).map_err(err_convert)?;
 
         let api_version = header.api_version;
-
-        // println!("[DEBUG]Decoded header: api_key={}, api_version={}, correlation_id={}, client_id={:?}", 
-        //          header.api_key, header.api_version, header.correlation_id, header.client_id);
+        if compat::lookup_api(header.api_key).is_none() {
+            return Err(err_convert(ProtocolError::UnknownApiKey(header.api_key)));
+        }
+        if !compat::is_supported_version(header.api_key, api_version) {
+            return Err(err_convert(ProtocolError::UnsupportedApiVersion {
+                api_key: header.api_key,
+                version: api_version,
+            }));
+        }
 
         let request_type = match header.api_key {
             0 => ProduceRequest::decode(&mut cursor, api_version).map(RequestType::Produce),

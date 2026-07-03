@@ -152,11 +152,11 @@ pub struct GroupCoordinator {
     /// store the sync group request that is not yet processed
     pending_sync_responders: HashMap<String, oneshot::Sender<Result<SyncGroupResult, ConsumerGroupError>>>,
 
-    /// 预期到齐的标识集合（按 instanceId 或 memberId）
+    /// expected ids to join the group
     expected_ids: Option<HashSet<String>>,
-    /// 是否按 instanceId 判断到齐（true 按 instanceId；false 按 memberId）
+    /// whether to check by instance id or member id
     expect_by_instance: bool,
-    /// 本轮 join 已到达的标识集合
+    /// pending arrived ids for this join phase
     pending_arrived_ids: HashSet<String>,
 }
 

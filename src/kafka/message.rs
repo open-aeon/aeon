@@ -157,7 +157,7 @@ impl Decode for RecordBatch {
         let base_offset = i64::decode(buf, api_version)?;
         let batch_length = i32::decode(buf, api_version)?;
 
-        // batch_length不包含前面的 base_offset(8)+batch_length(4)，因此读取这么多字节即可
+        // batch_length does not include the previous base_offset(8)+batch_length(4), so read this many bytes
         let batch_buf = buf.copy_to_bytes(batch_length as usize);
         let mut batch_cursor = Cursor::new(&batch_buf);
 
@@ -188,7 +188,7 @@ impl Decode for RecordBatch {
         let base_sequence = i32::decode(&mut batch_cursor, api_version)?;
         let records_count = i32::decode(&mut batch_cursor, api_version)?;
 
-        // 不再复制/解析 records 正文，避免越界/兼容压缩情况
+        // do not copy/parse records body, avoid overflow/compatibility with compression
         let records = Vec::new();
 
         Ok(Self {

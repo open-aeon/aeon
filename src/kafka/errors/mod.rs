@@ -1,2 +1,20 @@
-
-// include!(concat!(env!("OUT_DIR"), "/kafka_errors.rs")); 
+pub const UNKNOWN_SERVER_ERROR: i16 = -1;
+pub const NONE: i16 = 0;
+pub const OFFSET_OUT_OF_RANGE: i16 = 1;
+pub const CORRUPT_MESSAGE: i16 = 2;
+pub const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
+pub const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
+pub const COORDINATOR_NOT_AVAILABLE: i16 = 15;
+pub const NOT_COORDINATOR: i16 = 16;
+pub const INVALID_RECORD: i16 = 17;
+pub const INVALID_REQUIRED_ACKS: i16 = 21;
+pub const ILLEGAL_GENERATION: i16 = 22;
+pub const UNKNOWN_MEMBER_ID: i16 = 25;
+pub const REBALANCE_IN_PROGRESS: i16 = 27;
+pub const GROUP_AUTHORIZATION_FAILED: i16 = 30;
+pub const UNSUPPORTED_VERSION: i16 = 35;
+pub const TOPIC_ALREADY_EXISTS: i16 = 36;
+pub const INVALID_PARTITIONS: i16 = 37;
+pub const INVALID_REQUEST: i16 = 42;
+pub const OFFSET_NOT_AVAILABLE: i16 = 78;
+pub const FENCED_INSTANCE_ID: i16 = 82;

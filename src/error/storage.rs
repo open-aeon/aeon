@@ -2,21 +2,21 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum StorageError {
-    #[error("IO 错误: {0}")]
+    #[error("IO Error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("段已满")]
+    #[error("Segment Full")]
     SegmentFull,
     
-    #[error("段不存在")]
+    #[error("Segment Not Found")]
     SegmentNotFound,
     
-    #[error("偏移量无效")]
+    #[error("Invalid Offset")]
     InvalidOffset,
 
-    #[error("Data corruption")]
+    #[error("Data Corruption")]
     DataCorruption,
     
-    #[error("其他错误: {0}")]
+    #[error("Other error: {0}")]
     Other(String),
 } 

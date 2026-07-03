@@ -11,22 +11,22 @@ pub use protocol::ProtocolError;
 
 #[derive(Error, Debug)]
 pub enum AeonError {
-    #[error("服务器错误: {0}")]
+    #[error("Server error: {0}")]
     Server(#[from] ServerError),
     
-    #[error("存储错误: {0}")]
+    #[error("Storage error: {0}")]
     Storage(#[from] StorageError),
     
-    #[error("协议错误: {0}")]
+    #[error("Protocol error: {0}")]
     Protocol(#[from] ProtocolError),
     
-    #[error("IO错误: {0}")]
+    #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     
-    #[error("配置错误: {0}")]
+    #[error("Config error: {0}")]
     Config(String),
     
-    #[error("其他错误: {0}")]
+    #[error("Other error: {0}")]
     Other(String),
 }
 
